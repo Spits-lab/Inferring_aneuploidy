@@ -34,11 +34,10 @@ install_if_missing <- function(pkgs, installer) {
     installer(missing)
   }
 }
-
-source("Functions_Processing_InferCNV.R")
-source("Score_system.R")
-source("GSVA.R")
-source("GSEA.R")
+source("~/GitHub/Inferring_aneuploidy/R/Functions_Processing_InferCNV.R")
+source("~/GitHub/Inferring_aneuploidy/R/Score_system.R")
+source("~/GitHub/Inferring_aneuploidy/R/GSVA.R")
+source("~/GitHub/Inferring_aneuploidy/R/GSEA.R")
 
 
 ############################################################################### -

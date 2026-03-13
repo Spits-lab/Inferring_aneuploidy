@@ -64,6 +64,8 @@ if (!requireNamespace("BiocManager", quietly = TRUE))
   install.packages("BiocManager")
 
 BiocManager::install(bioc_packages)
+```
+
 ---
 
 # Repository Status

@@ -232,6 +232,7 @@ final_obj <- list(
 ################################################################################# -
 ############################# Chromossome Arm Info ##############################
 ################################################################################ --
+
 load("C:/Users/pmgra/Documents/VUB/InferCNV/chromossome_arms.RData")
 
 #Merge cnv_overlap info with the information that we know about the chromossomes
@@ -325,18 +326,10 @@ cnv_filtered <- res_scores %>%
   filter(confidence == "high")
 
 
-length(unique(cnv_filtered$cell_name[cnv_filtered$dataset == "Neuroectoderm"]))
 
 ########################################################################### -
 ##############################Chromossome Ploting##########################
 ############################################################################ -
-
-
-
-
-library(dplyr)
-
-
 
 cnv_filtered <- cnv_filtered %>% arrange(dataset,chr)
 

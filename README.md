@@ -85,8 +85,7 @@ The repository is shared to ensure **transparency**
 
 # Authors
 
-Pedro Granjo, Claudia Spits
-Genetics Reproduction & Development Research Group
+Pedro Granjo and  Claudia Spits from the VUB - Genetics Reproduction & Development Research Group
 
 ---
 

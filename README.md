@@ -31,7 +31,7 @@ The current preliminary MEANDER pipeline on scRNA-seq datasets containing:
 
 # Implementation
 
-The underdevelopment framework is implemented in **R** and designed as a modular pipeline for CNV inference from single-cell RNA sequencing datasets.
+The preliminary framework is implemented in **R** and designed as a modular pipeline for CNV inference from single-cell RNA sequencing datasets.
 
 ## Required R Packages
 

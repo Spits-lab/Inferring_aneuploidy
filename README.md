@@ -21,7 +21,7 @@ Several reference-free approaches have been proposed, but these methods often re
 
 # Input Data
 
-The current preliminary MEANDER pipeline on scRNA-seq datasets containing:
+The current preliminary framework operates on scRNA-seq datasets containing:
 - gene expression matrix
 - gene genomic coordinates
 - cell metadata

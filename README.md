@@ -1,7 +1,7 @@
 # MEANDER
 ### Revealing the mechanisms of aneuploidy-driven cell fate decisions in early human development
 
-One of the MEANDER work packages develops a framework for **reference-independent copy number variation (CNV) inference from single-cell RNA-sequencing data**, being part of a broader research initiative investigating **aneuploidy-driven cellular dynamics during early human development**. 
+This MEANDER work package develops a framework for **reference-independent copy number variation (CNV) inference from single-cell RNA-sequencing data**, being part of a broader research initiative investigating **aneuploidy-driven cellular dynamics during early human development**. 
 
 ---
 

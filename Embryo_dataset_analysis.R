@@ -1,37 +1,70 @@
+#' @title Embryo Dataset Analysis
+#'
+#' @description
+#' 
+#' Central File where the analysis of a scRNA-seq data from an Embryo dataset is analyzed 
+#' 
+#' @author Pedro Granjo
+#' @date 13-03-2026
+#' 
+#' 
+
+
 
 #Now the working directory will be the folder that this RScript is located
 setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
 
 #I'm assuming that run file cleaned Claudia and the other document Functions Processing and the other one Petropolous are all
 # in the same folder
+#' @title Installation of missing packages
+#'
+#' @description
+#'  Installs required packages that are not currently installed 
+#' 
+#' @param pkgs packages that you need for your analysis
+#' @param installer type of installation, if it is from Biocondutor e.g(BiocManager::install) or cran
+#' 
+#' 
+install_if_missing <- function(pkgs, installer) {
+  
+  missing <- pkgs[!pkgs %in% rownames(installed.packages())]
+  
+  if (length(missing) > 0) {
+    message("Installing missing packages: ", paste(missing, collapse = ", "))
+    installer(missing)
+  }
+}
 
 source("Functions_Processing_InferCNV.R")
 source("Score_system.R")
 source("GSVA.R")
 source("GSEA.R")
-###############################################################################
+
+
+############################################################################### -
+############### Initial Processing of InferCNV Calls ##########################
+############################################################################### -
+
+ref_dirs <- c("ref1", "ref2", "ref3")
+
+infer_objs <- discover_infercnv_runs(base_dir,ref_dirs, pattern = "^run\\.final")
+#infer_objs <- discover_infercnv_runs(base_dir,ref_dirs, pattern = "^17_HMM_.*\\.infercnv_obj$")
+
+infer_objs_1 <- lapply(infer_objs, function(x){
+  return(list(x@expr.data, x@gene_order))
+})
+
+infer_objs <- load_and_prepare_infercnv_reference(infer_objs_1)
+
+
+final_data <- run_fast_cnv_pipeline(infer_objs,max_gap = 80000,
+                                    min_reciprocal_overlap = 0.75)
+
+
+############################################################################### -
 ############################### Distribution of Gain and Loss #################
-###############################################################################
-res <- readRDS("Petropolous_Karyotyping.rds")
+############################################################################### -
 
-load("C:/Users/pmgra/Documents/VUB/InferCNV/TE_cells_Petroupoulous_02172026/TE_infercnv_all.RData")
-supported_events <- FWO_Eduard_hescp_dataD0_2[["cnv_support_tbl"]]
-cnv_filtered <- res[["cnv_table_chromossome_filtered"]]
-chromosome_arms <- res[["chromosome_arms"]]
-seurat_obj <- res[["seura_obj"]]
-cnv_total <- res[["cnv_table"]]
-
-
-info <- data.frame(cell_name = rownames(seurat_obj@meta.data), cell_type = seurat_obj@meta.data$predicted_celltype_singler)
-info$cell_name
-
-
-cnv_total <- cnv_total %>%
-  dplyr::left_join(info, by = c("cell_name_new" = "cell_name"))
-
-
-supported_events <- final_data[["cnv_support_tbl"]]
-#supported_events <- res[["supported_events"]]
 
 #columns like cnv_length, cnv_length_mb to the table
 supported_events <- add_additional_columns(supported_events)
@@ -41,9 +74,9 @@ supported_events <- add_additional_columns(supported_events)
 plot_all_cnv_distributions(supported_events,c(5, 25, 50))
 
 
-#################################################################################
+################################################################################# -
 ############################# Chromossome Arm Info ##############################
-################################################################################
+################################################################################ -
 
 library(readr)
 load("C:/Users/pmgra/Documents/VUB/InferCNV/chromossome_arms.RData")
@@ -62,8 +95,6 @@ cnv_total <- calculate_cnv_arm_percentages(
   cnv_arm_class,
   chromosome_arms
 )
-
-
 
 
 plot_df <- cnv_total %>%
@@ -93,13 +124,12 @@ plot_long <- plot_df %>%
       grepl("loss", event) ~ "Loss"
     )
   )
-
-table(plot_long[plot_long$percentage > 80,"event"])
-
-
-##########################################################################
+########################################################################## -
 ############################# Statistics #################################
-##########################################################################
+########################################################################## -
+
+#install.packages("patchwork")
+library(patchwork)
 
 
 # Create the three plots to see distributions of CNV % based on chromossome
@@ -107,22 +137,33 @@ p1 <- make_density_plot("Whole chromosome", plot_long)
 p2 <- make_density_plot("p arm", plot_long)
 p3 <- make_density_plot("q arm",plot_long)
 
-# Stack vertically
-library(patchwork)
+
 
 final_plot <- p1 | p2 | p3
 
-ggsave("cnv_density_plots_gap_80k_overlap_075_mean_sd_ed.png",
-       final_plot,
-       width = 17,
-       height = 8,
-       dpi = 300)
+#ggsave("cnv_density_plots_gap_80k_overlap_075_mean_sd_ed.png",
+#       final_plot,
+#       width = 17,
+#       height = 8,
+#       dpi = 300)
 
 
-#########################################################################
-################## Subseting based on Chromossomal arm ##################
-#########################################################################
+#########################################################################-
+################## Filtered and SCoring of CNV segments ##################
+#########################################################################-
 
+#Save RDS object
+res <- readRDS("Petropolous_Karyotyping.rds")
+
+chromosome_arms <- res[["chromosome_arms"]]
+seurat_obj <- res[["seura_obj"]]
+cnv_total <- res[["cnv_table"]]
+
+
+info <- data.frame(cell_name = rownames(seurat_obj@meta.data), cell_type = seurat_obj@meta.data$predicted_celltype_singler)
+
+cnv_total <- cnv_total %>%
+  dplyr::left_join(info, by = c("cell_name_new" = "cell_name"))
 
 
 all_events <- cnv_total %>%
@@ -133,15 +174,14 @@ all_events <- cnv_total %>%
   )
 
 
-
+#Analysis of CNV segment frequency based on the embryo
 clustered_events <- run_cnv_locus_analysis(all_events, by = c("embryo"), min_recip = 0.80, cluster_mode = "complete", sample_col = "embryo")
 
+#Number of cells detected per embryo
 n <- lapply(unique(cnv_total$embryo), function(embryo){
   data.frame(cell_type = embryo, n_total_cells = sum(grepl(embryo,colnames(seurat_obj))))
 })
-
 celltype_sizes <- do.call(rbind,n)
-
 
 
 min_thr <- resolve_celltype_thresholds(
@@ -152,13 +192,11 @@ min_thr <- resolve_celltype_thresholds(
   max_threshold = Inf
 )
 
-
-
 high_thr <- min_thr
 colnames(high_thr)[colnames(high_thr) == "min_cells_keep"] <- "high_min_cells"
-
 colnames(high_thr)[colnames(high_thr) == "cell_type"] <- "embryo"
 colnames(min_thr)[colnames(min_thr) == "cell_type"] <- "embryo"
+
 
 res_scores <- score_cnv_clusters(
   clustered_events$cnv_locus_summary,
@@ -171,17 +209,13 @@ res_scores <- score_cnv_clusters(
 )
 
 
-
-
-table(res_scores$confidence)
-
 #Info with two list elements stage - how many embryos compared to seurat and embryo level - how many cells per embryo 
 summary_info <- make_embryo_stage_summary(cnv_filtered, seurat_obj)
 
-
-###########################################################################
+ 
+########################################################################### -
 ##############################Chromossome Ploting##########################
-############################################################################
+############################################################################ -
 
 library(dplyr)
 
@@ -204,7 +238,7 @@ cnv_mapped <- cnv_mapped %>%
   arrange(embryo, chr) %>%
   mutate(plot_idx = row_number(), cell_type = factor(cell_type), embryo = factor(embryo), chr = factor(chr))
 
-
+#Separation of CNV segments based on the embryo - Potential Embryo-based patterns are displayed
 dataset_boundaries <- cnv_mapped %>%
   group_by(embryo) %>%
   summarise(max_idx = max(plot_idx), .groups = "drop")
@@ -212,16 +246,12 @@ dataset_boundaries <- cnv_mapped %>%
 boundary_lines <- head(dataset_boundaries$max_idx + 0.5, -1)
 
 
-
-
 # 5. Plot
-
 ideogram_plot <- plot_ideogram(genome_structure,
                                dim(cnv_filtered)[1],
                                arm_colors = c("p"="#4DBBD5",
                                               "cen"="black",
                                               "q"="#E64B35")) 
-
 
 heatmap_plot <- plot_cnv_heatmap(
   cnv_mapped,
@@ -232,26 +262,13 @@ heatmap_plot <- plot_cnv_heatmap(
 
 
 #ggsave(filename="heat_FWO.jpeg",plot = combined_plot, width = 22, height = 10 ,units = "cm",dpi = 300)
-
+#install.packages("gridExtra")
 library(gridExtra)
-
-combined_plot_raw <- assemble_heatmap_with_ideogram(heatmap_plot_raw,
-                                                    ideogram_plot,
-                                                    cnv_mapped)
 
 
 combined_plot <- assemble_heatmap_with_ideogram(heatmap_plot,
                                                 ideogram_plot,
                                                 cnv_mapped)
-
-heatmaps_combined <- plot_grid(
-  combined_plot_raw,
-  combined_plot,
-  ncol = 1,
-  align = "v",
-  labels = c("A", "B")
-)
-
 
 legend_cnv <- cowplot::get_legend(
   heatmap_plot + theme(legend.position = "right")
@@ -283,23 +300,25 @@ grid.draw(
 )
 
 
-ggsave(
-  filename = "C:/Users/pmgra/Documents/VUB/InferCNV/Petropoulous__2016/CNV_final_figure_Petropoulos2016.pdf",
-  plot = final_grob,
-  width = 14,
-  height = 10,
-  dpi = 300
-)
+#ggsave(
+#  filename = "C:/Users/pmgra/Documents/VUB/InferCNV/Petropoulous__2016/CNV_final_figure_Petropoulos2016.pdf",
+#  plot = final_grob,
+#  width = 14,
+#  height = 10,
+#  dpi = 300
+#)
 
+######################################################################################### -
+################################## GSEA Analysis ########################################
+######################################################################################### -
+
+# TE is the only cell type ideal for a pseudo-bulk analysis
 
 cnv_filtered <- cnv_filtered[cnv_filtered$cell_type =="TE",, drop = F]
 
 seu <- label_karyotype_from_aneu_table(seurat_obj, cnv_filtered,cell_col = "cell_name_new")
-
-
-table(seu$karyotype, useNA = "ifany")
-
 seu <- subset(seu, predicted_celltype_singler == "TE")
+
 
 pb_lineage <- make_pseudobulk(
   seu,
@@ -313,60 +332,35 @@ res <- run_edger_by_lineage(pb_counts = pb_lineage$pb_counts, pb_meta = pb_linea
 
 hallmark_sets <- get_hallmark_sets()
 
-fgsea_by_lineage <- lapply(
-  names(res$de_by_lineage),
-  function(lin) {
-    
-    de_tbl <- res$de_by_lineage[[lin]]
-    
-    if (nrow(de_tbl) == 0) return(NULL)
-    
-    fg <- run_fgsea_for_lineage(
-      de_tbl,
+
+fg <- run_fgsea_for_lineage(
+      res$de_by_lineage[[1]],
       hallmark_sets,
       minSize = 10,
-      maxSize = 500
-    )
-    
-    fg$lineage <- lin
-    fg
-  }
-)
-
-names(fgsea_by_lineage) <- names(res$de_by_lineage)
+      maxSize = 500)
 
 
 
-sv_plot <- plot_fgsea_bar(fgsea_by_lineage$TE,
+
+sv_plot <- plot_fgsea_bar(fg$TE,
                padj_cutoff = 0.05,
                n_max = 10,
                title = "TE — Hallmark enrichment",
                show_labels = TRUE) 
 
-ggsave(plot= sv_plot, filename = "C:/Users/pmgra/Documents/VUB/InferCNV/Petropoulous__2016/enrichmentplot.png",
-       width = 21,
-       height = 10,
-       dpi = 300)
+#ggsave(plot= sv_plot, filename = "C:/Users/pmgra/Documents/VUB/InferCNV/Petropoulous__2016/enrichmentplot.png",
+#       width = 21,
+#       height = 10,
+#       dpi = 300)
 
 
-###GSVA
+######################################################################################### -
+################################## GSVA Analysis ########################################
+######################################################################################### -
 
 
 
 
-
-test <- readRDS("C:/Users/pmgra/Downloads/run.final.infercnv_obj")
-
-library(Seurat)
-genes_annot <- test@gene_order
-
-
-suppressPackageStartupMessages({
-  library(GenomicRanges)
-  library(IRanges)
-  library(dplyr)
-  library(Matrix)
-})
 
 test <- readRDS("C:/Users/pmgra/Downloads/run.final.infercnv_obj")
 
@@ -374,7 +368,7 @@ library(Seurat)
 genes_annot <- test@gene_order
 raw_data <- GetAssayData(seu, layer="data")
 
-## ---- 1) Prepare gene annotation (rownames -> gene_id) ----
+##1) Prepare gene annotation (rownames -> gene_id)
 
 # gene_annot must have: chr, start, stop (hg38)
 genes_df <- genes_annot %>%
@@ -387,8 +381,6 @@ genes_df <- genes_annot %>%
     gene_id = as.character(gene_id)
   )
 
-# Defensive checks
-stopifnot(all(c("chr","start","end","gene_id") %in% names(genes_df)))
 genes_df <- genes_df %>% filter(!is.na(chr), !is.na(start), !is.na(end), end >= start)
 
 genes_gr <- GRanges(
@@ -419,7 +411,7 @@ segs_gr <- GRanges(
   cnv_state= segs_df$cnv_state
 )
 
-## ---- 3) Overlaps + unilateral gene coverage filter (>= 80%) ----
+## 3) Overlaps + unilateral gene coverage filter (>= 80%)
 hits <- findOverlaps(genes_gr, segs_gr, ignore.strand = TRUE)
 qh <- queryHits(hits)    # gene indices
 sh <- subjectHits(hits)  # segment indices
@@ -441,7 +433,7 @@ hit_df <- tibble(
   ov_bp   = ov_bp
 )
 
-## ---- 4) Resolve genes overlapping multiple segments in same cell ----
+## 4) Resolve genes overlapping multiple segments in same cell
 # Rule: among qualifying segments, choose the segment with max ov_bp (winner-take-most)
 gene_cell_call <- hit_df %>%
   group_by(gene_id, cell) %>%
@@ -460,7 +452,7 @@ gene_cell_call <- gene_cell_call %>%
   filter(gene_id %in% rownames(raw_data))
 
 
-## ---- 5) Per-cell burdens ----
+## Per-cell burdens
 burden <- gene_cell_call %>%
   group_by(cell) %>%
   summarise(
@@ -470,19 +462,9 @@ burden <- gene_cell_call %>%
     .groups = "drop"
   )
 
-hist(burden$B_total)
-
-library(msigdbr)
 
 
-get_hallmark_sets <- function(species = "Homo sapiens") {
-  msigdbr(species = species, category = "H") %>%
-    as.data.table() %>%
-    split(by = "gs_name", keep.by = FALSE) %>%
-    lapply(function(dt) unique(dt$gene_symbol))
-}
 
-gene_sets <- get_hallmark_sets()
 gsva_res <- scgsva_pipeline(seu, gene_sets,assay = "SCT")
 
 hallmark_cols <- colnames(gsva_res@meta.data)[
@@ -496,93 +478,6 @@ cell_type <- "TE"
 
 
 
-run_hallmark_lm_by_celltype <- function(gsva_meta,
-                                        hallmark_cols,
-                                        btotal,
-                                        cell_type,
-                                        min_cells = 10,
-                                        r2_threshold = 0.10,
-                                        padj_method = "BH") {
-  
-  results <- vector("list", length(hallmark_cols))
-  names(results) <- hallmark_cols
-  
-  for (hm in hallmark_cols) {
-    
-    assess <- data.frame(
-      cell = names(btotal),
-      pathway_score = gsva_meta[names(btotal), hm, drop = TRUE],
-      btotal = btotal,
-      cell_type = cell_type,
-      stringsAsFactors = FALSE
-    )
-    
-    assess <- assess[complete.cases(assess), ]
-    
-    models_by_celltype <- lapply(split(assess, assess$cell_type), function(df) {
-      if (nrow(df) < min_cells) return(NULL)
-      
-      # optional: skip if no variation in predictor or response
-      if (length(unique(df$btotal)) < 2) return(NULL)
-      if (length(unique(df$pathway_score)) < 2) return(NULL)
-      
-      lm(pathway_score ~ btotal, data = df)
-    })
-    
-    res_hm <- lapply(names(models_by_celltype), function(ct) {
-      mod <- models_by_celltype[[ct]]
-      if (is.null(mod)) return(NULL)
-      
-      sm <- summary(mod)
-      coef_tab <- sm$coefficients
-      
-      if (!"btotal" %in% rownames(coef_tab)) return(NULL)
-      
-      data.frame(
-        hallmark = hm,
-        cell_type = ct,
-        n_cells = nrow(model.frame(mod)),
-        beta_btotal = coef_tab["btotal", "Estimate"],
-        se_btotal = coef_tab["btotal", "Std. Error"],
-        t_btotal = coef_tab["btotal", "t value"],
-        p_btotal = coef_tab["btotal", "Pr(>|t|)"],
-        r_squared = sm$r.squared,
-        adj_r_squared = sm$adj.r.squared,
-        stringsAsFactors = FALSE
-      )
-    })
-    
-    res_hm <- Filter(Negate(is.null), res_hm)
-    
-    if (length(res_hm) > 0) {
-      res_hm <- do.call(rbind, res_hm)
-      res_hm$padj_btotal <- p.adjust(res_hm$p_btotal, method = padj_method)
-      res_hm$pass_sig <- res_hm$padj_btotal < 0.05
-      res_hm$pass_r2 <- res_hm$r_squared >= r2_threshold
-      res_hm$pass_both <- res_hm$pass_sig & res_hm$pass_r2
-    } else {
-      res_hm <- NULL
-    }
-    
-    results[[hm]] <- res_hm
-  }
-  
-  results <- Filter(Negate(is.null), results)
-  
-  all_results <- if (length(results) > 0) {
-    do.call(rbind, results)
-  } else {
-    data.frame()
-  }
-  
-  list(
-    by_hallmark = results,
-    all_results = all_results,
-    significant_and_good_r2 = subset(all_results, padj_btotal < 0.05 & r_squared >= r2_threshold)
-  )
-}
-
-
 lm_res <- run_hallmark_lm_by_celltype(
   gsva_meta = gsva_res@meta.data,
   hallmark_cols = hallmark_cols,
@@ -593,35 +488,10 @@ lm_res <- run_hallmark_lm_by_celltype(
 )
 
 
-df <- data.frame(cell = names(btotal),
-                 B_total = btotal,
-                 HALLMARK_P53_PATHWAY = gsva_res@meta.data[names(btotal), "HALLMARK_P53_PATHWAY", drop = TRUE],
-                 infercnv_group = "TE",
-                 stringsAsFactors = FALSE
-                 )
 
-df_te <- subset(df, infercnv_group == "TE")
-df_te <- df_te[complete.cases(df_te[, c("B_total", "HALLMARK_P53_PATHWAY")]), ]
-
-mod_te <- lm(HALLMARK_P53_PATHWAY ~ B_total, data = df_te)
-sm <- summary(mod_te)
-
-label <- paste0(
-  "R² = ", round(sm$r.squared, 3),
-  "\n p = ", signif(sm$coefficients["B_total", "Pr(>|t|)"], 3)
-)
-ggplot(df_te, aes(x = B_total, y = HALLMARK_P53_PATHWAY)) +
-  geom_point(alpha = 0.6) +
-  geom_smooth(method = "lm", se = TRUE) +
-  annotate("text", x = Inf, y = Inf, label = label,
-           hjust = 1.1, vjust = 1.5)  +
-  theme_bw() +
-  labs(
-    title = "Trophectoderm",
-    x = "CNV burden (B_total)",
-    y = "HALLMARK_P53_PATHWAY"
-  )
-
+######################################################################################### -
+################################## UMAP Plot ############################################
+######################################################################################### -
 
 
 
@@ -731,8 +601,8 @@ p <- plot_umap_focus_TE_Pre_with_aneuploid_ring(
 
 
 
-ggsave(p, filename = "Umap.pdf",  width = 8,  # smaller width
-       height = 6)
+#ggsave(p, filename = "Umap.pdf",  width = 8,  # smaller width
+#       height = 6)
 
 
 

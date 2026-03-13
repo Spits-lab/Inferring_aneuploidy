@@ -11,11 +11,6 @@
 #' 
 
 
-#Set Working Directory
-setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
-
-#Loading functions developed for the workflow
-source("clusters_cell_type_processing_functions.R")
 
 # Package groups
 cran_packages <- c(
@@ -26,7 +21,24 @@ bioc_packages <- c(
   "edgeR"
 )
 
-
+#' @title Installation of missing packages
+#'
+#' @description
+#'  Installs required packages that are not currently installed 
+#' 
+#' @param pkgs packages that you need for your analysis
+#' @param installer type of installation, if it is from Biocondutor e.g(BiocManager::install) or cran
+#' 
+#' 
+install_if_missing <- function(pkgs, installer) {
+  
+  missing <- pkgs[!pkgs %in% rownames(installed.packages())]
+  
+  if (length(missing) > 0) {
+    message("Installing missing packages: ", paste(missing, collapse = ", "))
+    installer(missing)
+  }
+}
 # Install missing CRAN and Bioconductor packages
 install_if_missing(cran_packages, install.packages)
 

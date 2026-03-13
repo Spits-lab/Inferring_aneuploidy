@@ -1,3 +1,49 @@
+#' @title Embryo Dataset Analysis
+#'
+#' @description
+#' 
+#' Central File where the analysis of a scRNA-seq data from an Embryo dataset is analyzed 
+#' 
+#' @author Pedro Granjo
+#' @date 13-03-2026
+#' 
+#' 
+
+
+
+#Now the working directory will be the folder that this RScript is located
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+
+#I'm assuming that run file cleaned Claudia and the other document Functions Processing and the other one Petropolous are all
+# in the same folder
+#' @title Installation of missing packages
+#'
+#' @description
+#'  Installs required packages that are not currently installed 
+#' 
+#' @param pkgs packages that you need for your analysis
+#' @param installer type of installation, if it is from Biocondutor e.g(BiocManager::install) or cran
+#' 
+#' 
+install_if_missing <- function(pkgs, installer) {
+  
+  missing <- pkgs[!pkgs %in% rownames(installed.packages())]
+  
+  if (length(missing) > 0) {
+    message("Installing missing packages: ", paste(missing, collapse = ", "))
+    installer(missing)
+  }
+}
+
+source("Functions_Processing_InferCNV.R")
+source("Score_system.R")
+source("GSVA.R")
+source("GSEA.R")
+
+
+############################################################################################################-
+############################# Across and Within Cell type Integration Approach##############################
+############################################################################################################-
 
 base_dir <- "C:/Users/pmgra/Documents/VUB/FWO_Claudia/D7_hPSC/final_data/"
 
@@ -58,11 +104,6 @@ shared_ds_cell <- intersect(unique(within_tbl$ds_cell), unique(across_tbl$ds_cel
 
 within_f <- within_tbl %>% filter(ds_cell %in% shared_ds_cell)
 across_f <- across_tbl %>% filter(ds_cell %in% shared_ds_cell)
-
-
-
-library(GenomicRanges)
-library(dplyr)
 
 # 1) Convert tables -> GRanges, keeping a row id
 to_gr <- function(df, prefix){
@@ -187,38 +228,15 @@ final_obj <- list(
   summary_by_dataset = summary_by_dataset
 )
 
-out_file <- file.path(base_dir, sprintf("integrated_across_within_common_minRecip%.2f.rds", min_recip))
-saveRDS(final_obj, out_file)
 
-message("Saved RDS: ", out_file)
-message("Summary: ", paste(names(summary_counts), unlist(summary_counts), sep="=", collapse=" | "))
-
-
-
-
-
-pairs_common <- integrated_across_within_common_minRecip0.75[["pairs_common"]][,grep("_within",colnames(integrated_across_within_common_minRecip0.75[["pairs_common"]])),,drop=F]
-colnames(pairs_common) <- gsub("_within", "", colnames(pairs_common))
-
-final_df <- bind_rows(integrated_across_within_common_minRecip0.75$within_only, integrated_across_within_common_minRecip0.75$across_only, pairs_common)
-
-#columns like cnv_length, cnv_length_mb to the table
-supported_events <- add_additional_columns(final_df)
-
-
-## OVerall CNVs Length
-plot_all_cnv_distributions(supported_events,c(5, 25, 50))
-
-
-#################################################################################
+################################################################################# -
 ############################# Chromossome Arm Info ##############################
-################################################################################
-
-library(readr)
+################################################################################ --
 load("C:/Users/pmgra/Documents/VUB/InferCNV/chromossome_arms.RData")
 
 #Merge cnv_overlap info with the information that we know about the chromossomes
 
+#reading rds object which is the initial processing phase seen above
 integrated_res <- readRDS("~/VUB/FWO_Claudia/integrated_across_within_common_minRecip0.75.rds")
 
 
@@ -232,20 +250,16 @@ pairs_common_clean <- integrated_res$pairs_common %>%
 
 supported_events <- bind_rows(integrated_res$across_only,
                               integrated_res$within_only,
-pairs_common_clean)
+                              pairs_common_clean)
 
 
 supported_events <- add_additional_columns(supported_events)
-
-
 
 cnv_arm_class <- add_chromosome_info(supported_events,
                                      chromosome_arms,
                                      chr_col = "chr",
                                      start_col = "start",
                                      end_col = "end") 
-
-
 
 #Add stats about whole chromossome and arm into the df total
 cnv_arm_class <- cnv_arm_class %>%
@@ -256,65 +270,9 @@ cnv_total <- calculate_cnv_arm_percentages(
   chromosome_arms
 )
 
-
-
-
-plot_df <- cnv_total %>%
-  dplyr::select(
-    whole_chromosome_gain,
-    whole_chromosome_loss,
-    p_arm_gain,
-    p_arm_loss,
-    q_arm_gain,
-    q_arm_loss
-  )
-
-# Convert to long format
-plot_long <- plot_df %>%
-  pivot_longer(cols = everything(),
-               names_to = "event",
-               values_to = "percentage") %>%
-  filter(!is.na(percentage)) %>%
-  mutate(
-    level = case_when(
-      grepl("whole", event) ~ "Whole chromosome",
-      grepl("^p_", event)   ~ "p arm",
-      grepl("^q_", event)   ~ "q arm"
-    ),
-    type = case_when(
-      grepl("gain", event) ~ "Gain",
-      grepl("loss", event) ~ "Loss"
-    )
-  )
-
-
-
-
-##########################################################################
-############################# Statistics #################################
-##########################################################################
-
-
-# Create the three plots to see distributions of CNV % based on chromossome
-p1 <- make_density_plot("Whole chromosome", plot_long, threshold = 80)
-p2 <- make_density_plot("p arm", plot_long, threshold = 80 )
-p3 <- make_density_plot("q arm",plot_long, threshold = 80)
-
-# Stack vertically
-library(patchwork)
-
-final_plot <- p1 | p2 | p3
-
-ggsave("cnv_density_plots_gap_80k_overlap_075_mean_sd_ed.png",
-       final_plot,
-       width = 17,
-       height = 8,
-       dpi = 300)
-
-
-#########################################################################
-################## Subseting based on Chromossomal arm ##################
-#########################################################################
+########################################################################### -
+################## Filtered and Scoring of CNV segments ###################
+########################################################################## -
 
 
 
@@ -369,9 +327,9 @@ cnv_filtered <- res_scores %>%
 
 length(unique(cnv_filtered$cell_name[cnv_filtered$dataset == "Neuroectoderm"]))
 
-###########################################################################
+########################################################################### -
 ##############################Chromossome Ploting##########################
-############################################################################
+############################################################################ -
 
 
 
@@ -472,6 +430,9 @@ grid.draw(
   final_grob 
 )
 
+######################################################################################### -
+################################## GSEA Analysis ########################################
+######################################################################################### -
 
 seu <- label_karyotype_from_aneu_table(seurat_obj_d7_sub, cnv_filtered,cell_col = "cell_name")
 raw_data <- GetAssayData(seu, layer="data")
@@ -527,9 +488,9 @@ ggsave("enrichment_plot_nonneuroectoderm.png",
        dpi = 300)
 
 
-###GSVA
-
-
+######################################################################################### -
+################################## GSVA Analysis ########################################
+######################################################################################### -
 
 
 
@@ -537,15 +498,6 @@ test <- readRDS("C:/Users/pmgra/Downloads/run.final.infercnv_obj")
 
 library(Seurat)
 genes_annot <- test@gene_order
-
-
-suppressPackageStartupMessages({
-  library(GenomicRanges)
-  library(IRanges)
-  library(dplyr)
-  library(Matrix)
-})
-
 
 
 ## ---- 1) Prepare gene annotation (rownames -> gene_id) ----
@@ -649,12 +601,6 @@ hist(burden$B_total)
 library(msigdbr)
 
 
-get_hallmark_sets <- function(species = "Homo sapiens") {
-  msigdbr(species = species, category = "H") %>%
-    as.data.table() %>%
-    split(by = "gs_name", keep.by = FALSE) %>%
-    lapply(function(dt) unique(dt$gene_symbol))
-}
 
 gene_sets <- get_hallmark_sets()
 gsva_res <- scgsva_pipeline(seurat_obj_d7_sub, gene_sets,assay = "SCT")
@@ -667,94 +613,6 @@ btotal <- as.vector(burden$B_total)
 names(btotal) <- burden$cell
 
 cell_type <- seurat_obj_d7_sub@meta.data[names(btotal), "cell_type", drop = TRUE]
-
-
-
-run_hallmark_lm_by_celltype <- function(gsva_meta,
-                                        hallmark_cols,
-                                        btotal,
-                                        cell_type,
-                                        min_cells = 10,
-                                        r2_threshold = 0.10,
-                                        padj_method = "BH") {
-  
-  results <- vector("list", length(hallmark_cols))
-  names(results) <- hallmark_cols
-  
-  for (hm in hallmark_cols) {
-    
-    assess <- data.frame(
-      cell = names(btotal),
-      pathway_score = gsva_meta[names(btotal), hm, drop = TRUE],
-      btotal = btotal,
-      cell_type = cell_type,
-      stringsAsFactors = FALSE
-    )
-    
-    assess <- assess[complete.cases(assess), ]
-    
-    models_by_celltype <- lapply(split(assess, assess$cell_type), function(df) {
-      if (nrow(df) < min_cells) return(NULL)
-      
-      # optional: skip if no variation in predictor or response
-      if (length(unique(df$btotal)) < 2) return(NULL)
-      if (length(unique(df$pathway_score)) < 2) return(NULL)
-      
-      lm(pathway_score ~ btotal, data = df)
-    })
-    
-    res_hm <- lapply(names(models_by_celltype), function(ct) {
-      mod <- models_by_celltype[[ct]]
-      if (is.null(mod)) return(NULL)
-      
-      sm <- summary(mod)
-      coef_tab <- sm$coefficients
-      
-      if (!"btotal" %in% rownames(coef_tab)) return(NULL)
-      
-      data.frame(
-        hallmark = hm,
-        cell_type = ct,
-        n_cells = nrow(model.frame(mod)),
-        beta_btotal = coef_tab["btotal", "Estimate"],
-        se_btotal = coef_tab["btotal", "Std. Error"],
-        t_btotal = coef_tab["btotal", "t value"],
-        p_btotal = coef_tab["btotal", "Pr(>|t|)"],
-        r_squared = sm$r.squared,
-        adj_r_squared = sm$adj.r.squared,
-        stringsAsFactors = FALSE
-      )
-    })
-    
-    res_hm <- Filter(Negate(is.null), res_hm)
-    
-    if (length(res_hm) > 0) {
-      res_hm <- do.call(rbind, res_hm)
-      res_hm$padj_btotal <- p.adjust(res_hm$p_btotal, method = padj_method)
-      res_hm$pass_sig <- res_hm$padj_btotal < 0.05
-      res_hm$pass_r2 <- res_hm$r_squared >= r2_threshold
-      res_hm$pass_both <- res_hm$pass_sig & res_hm$pass_r2
-    } else {
-      res_hm <- NULL
-    }
-    
-    results[[hm]] <- res_hm
-  }
-  
-  results <- Filter(Negate(is.null), results)
-  
-  all_results <- if (length(results) > 0) {
-    do.call(rbind, results)
-  } else {
-    data.frame()
-  }
-  
-  list(
-    by_hallmark = results,
-    all_results = all_results,
-    significant_and_good_r2 = subset(all_results, padj_btotal < 0.05 & r_squared >= r2_threshold)
-  )
-}
 
 
 lm_res <- run_hallmark_lm_by_celltype(
@@ -816,103 +674,15 @@ results <- lapply(hallmarks, function(h) {
     r2 = summary(model)$r.squared
   )
 })
-
-
 results <- do.call(rbind, results)
 
 
-compute_percent_genome_imbalanced <- function(cnv_df, genome_size_bp = 3.1e9) {
-  
-  required_cols <- c("cell_name", "chr", "start", "end")
-  missing_cols <- setdiff(required_cols, colnames(cnv_df))
-  if (length(missing_cols) > 0) {
-    stop("Missing required columns: ", paste(missing_cols, collapse = ", "))
-  }
-  
-  segs_df <- cnv_df %>%
-    transmute(
-      cell = as.character(cell_name),
-      chr = as.character(chr),
-      start = as.integer(start),
-      end = as.integer(end)
-    ) %>%
-    filter(!is.na(cell), !is.na(chr), !is.na(start), !is.na(end), end >= start)
-  
-  split_segs <- split(segs_df, segs_df$cell)
-  
-  out <- lapply(names(split_segs), function(cl) {
-    x <- split_segs[[cl]]
-    
-    gr <- GRanges(
-      seqnames = x$chr,
-      ranges = IRanges(start = x$start, end = x$end)
-    )
-    
-    gr_red <- reduce(gr, ignore.strand = TRUE)
-    bp_imbalanced <- sum(width(gr_red))
-    
-    data.frame(
-      cell = cl,
-      bp_imbalanced = bp_imbalanced,
-      frac_genome_imbalanced = bp_imbalanced / genome_size_bp,
-      pct_genome_imbalanced = 100 * bp_imbalanced / genome_size_bp
-    )
-  })
-  
-  bind_rows(out)
-}
 
+############################################################################################ -
+################################## Genome Imbalance ########################################
+############################################################################################ -
 
-############################3
-## % genome imbalance
-
-library(dplyr)
-library(GenomicRanges)
-library(IRanges)
-library(purrr)
-
-compute_percent_genome_imbalanced <- function(cnv_df, genome_size_bp = 3.1e9) {
-  
-  required_cols <- c("cell_name", "chr", "start", "end")
-  missing_cols <- setdiff(required_cols, colnames(cnv_df))
-  if (length(missing_cols) > 0) {
-    stop("Missing required columns: ", paste(missing_cols, collapse = ", "))
-  }
-  
-  segs_df <- cnv_df %>%
-    transmute(
-      cell = as.character(cell_name),
-      chr = as.character(chr),
-      start = as.integer(start),
-      end = as.integer(end)
-    ) %>%
-    filter(!is.na(cell), !is.na(chr), !is.na(start), !is.na(end), end >= start)
-  
-  split_segs <- split(segs_df, segs_df$cell)
-  
-  out <- lapply(names(split_segs), function(cl) {
-    x <- split_segs[[cl]]
-    
-    gr <- GenomicRanges::GRanges(
-      seqnames = x$chr,
-      ranges = IRanges(start = x$start, end = x$end)
-    )
-    
-    gr_red <- GenomicRanges::reduce(gr, ignore.strand = TRUE)
-    bp_imbalanced <- sum(width(gr_red))
-    
-    data.frame(
-      cell = cl,
-      bp_imbalanced = bp_imbalanced,
-      frac_genome_imbalanced = bp_imbalanced / genome_size_bp,
-      pct_genome_imbalanced = 100 * bp_imbalanced / genome_size_bp
-    )
-  })
-  
-  bind_rows(out)
-}
-
-
+#need to load GSVA R file for functions
 
 genes_gr <- GRanges(
   seqnames = genes_df$chr,
@@ -975,14 +745,14 @@ p <- ggplot(genome_segments, aes(x = dataset, y = pct_genome_imbalanced, fill = 
     y = "% genome imbalanced"
   )      
 
-ggsave("Edo_whole_genome_imbalance.pdf",
-       p,
-       width = 10,
-       height = 8,
-       dpi = 400)
+#ggsave("Edo_whole_genome_imbalance.pdf",
+#       p,
+#       width = 10,
+#       height = 8,
+#       dpi = 400)
 
-ggsave("Edo_genome_expressed_imbalance.pdf",
-       g ,
-       width = 10,
-       height = 8,
-       dpi = 400)
+#ggsave("Edo_genome_expressed_imbalance.pdf",
+#       g ,
+#       width = 10,
+#       height = 8,
+#       dpi = 400)

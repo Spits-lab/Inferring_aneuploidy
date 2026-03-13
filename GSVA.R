@@ -8,11 +8,7 @@
 #' @date 13-03-2026
 #' 
 
-#Set Working Directory
-setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
 
-#Loading functions developed for the workflow
-source("clusters_cell_type_processing_functions.R")
 
 # Package groups
 cran_packages <- c(
@@ -23,7 +19,24 @@ bioc_packages <- c(
   "GSVA"
 )
 
-
+#' @title Installation of missing packages
+#'
+#' @description
+#'  Installs required packages that are not currently installed 
+#' 
+#' @param pkgs packages that you need for your analysis
+#' @param installer type of installation, if it is from Biocondutor e.g(BiocManager::install) or cran
+#' 
+#' 
+install_if_missing <- function(pkgs, installer) {
+  
+  missing <- pkgs[!pkgs %in% rownames(installed.packages())]
+  
+  if (length(missing) > 0) {
+    message("Installing missing packages: ", paste(missing, collapse = ", "))
+    installer(missing)
+  }
+}
 # Install missing CRAN and Bioconductor packages
 install_if_missing(cran_packages, install.packages)
 
@@ -302,6 +315,49 @@ run_hallmark_lm_by_celltype <- function(gsva_meta,
     all_results = all_results,
     significant_and_good_r2 = subset(all_results, padj_btotal < 0.05 & r_squared >= r2_threshold)
   )
+}
+
+
+
+compute_percent_genome_imbalanced <- function(cnv_df, genome_size_bp = 3.1e9) {
+  
+  required_cols <- c("cell_name", "chr", "start", "end")
+  missing_cols <- setdiff(required_cols, colnames(cnv_df))
+  if (length(missing_cols) > 0) {
+    stop("Missing required columns: ", paste(missing_cols, collapse = ", "))
+  }
+  
+  segs_df <- cnv_df %>%
+    transmute(
+      cell = as.character(cell_name),
+      chr = as.character(chr),
+      start = as.integer(start),
+      end = as.integer(end)
+    ) %>%
+    filter(!is.na(cell), !is.na(chr), !is.na(start), !is.na(end), end >= start)
+  
+  split_segs <- split(segs_df, segs_df$cell)
+  
+  out <- lapply(names(split_segs), function(cl) {
+    x <- split_segs[[cl]]
+    
+    gr <- GenomicRanges::GRanges(
+      seqnames = x$chr,
+      ranges = IRanges(start = x$start, end = x$end)
+    )
+    
+    gr_red <- GenomicRanges::reduce(gr, ignore.strand = TRUE)
+    bp_imbalanced <- sum(width(gr_red))
+    
+    data.frame(
+      cell = cl,
+      bp_imbalanced = bp_imbalanced,
+      frac_genome_imbalanced = bp_imbalanced / genome_size_bp,
+      pct_genome_imbalanced = 100 * bp_imbalanced / genome_size_bp
+    )
+  })
+  
+  bind_rows(out)
 }
 
 

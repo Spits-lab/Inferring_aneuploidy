@@ -72,9 +72,9 @@ invisible(lapply(all_packages, function(pkg) {
 #' reciprocal overlaps. A sequence similarity can be achieve by assessing sequences within subclusters
 #'
 #' @param df Data frame containing CNV events.
-#' @param min_recip Minimum reciprocal overlap required between two events
+#' @param min_reciprocal_overlap Minimum reciprocal overlap required between two events
 #' to be considered connected. Default is 0.75.
-refine_complete_subclusters <- function(x, min_recip = 0.75) {
+refine_complete_subclusters <- function(x, min_reciprocal_overlap = 0.75) {
   
   if (nrow(x) <= 1) {
     x$subcluster_id <- 1L
@@ -104,8 +104,8 @@ refine_complete_subclusters <- function(x, min_recip = 0.75) {
   }
   
   inter <- width(pintersect(gr[q], gr[s]))
-  recip_ok <- (inter / width(gr[q]) >= min_recip) &
-    (inter / width(gr[s]) >= min_recip)
+  recip_ok <- (inter / width(gr[q]) >= min_reciprocal_overlap) &
+    (inter / width(gr[s]) >= min_reciprocal_overlap)
   
   q <- q[recip_ok]
   s <- s[recip_ok]
@@ -160,7 +160,7 @@ refine_complete_subclusters <- function(x, min_recip = 0.75) {
 #' @param by Character vector specifying grouping columns (e.g. dataset, embryo, cell type).
 #' @param cluster_mode Clustering strategy passed to connected (graph connectivity derived from
 #' reciprocal overlaps or complete if we want subgroups within the clusters connectivity)
-#' @param min_recip Minimum reciprocal overlap threshold.
+#' @param min_reciprocal_overlap Minimum reciprocal overlap threshold.
 #'
 #' @details
 #' The function splits the input data frame according to the grouping
@@ -168,7 +168,7 @@ refine_complete_subclusters <- function(x, min_recip = 0.75) {
 #'
 #' @return
 #' Data frame with clustered CNV events including the `cluster_id` column.
-cluster_cnv_events <- function(df, min_recip = 0.75,
+cluster_cnv_events <- function(df, min_reciprocal_overlap = 0.75,
                                cluster_mode = c("connected", "complete")) {
   
   cluster_mode <- match.arg(cluster_mode)
@@ -215,8 +215,8 @@ cluster_cnv_events <- function(df, min_recip = 0.75,
     s <- s[keep]
     
     inter <- width(pintersect(gr[q], gr[s]))
-    recip_ok <- (inter / width(gr[q]) >= min_recip) &
-      (inter / width(gr[s]) >= min_recip)
+    recip_ok <- (inter / width(gr[q]) >= min_reciprocal_overlap) &
+      (inter / width(gr[s]) >= min_reciprocal_overlap)
     
     q <- q[recip_ok]
     s <- s[recip_ok]
@@ -239,7 +239,7 @@ cluster_cnv_events <- function(df, min_recip = 0.75,
       # refine inside each connected component
       x <- x %>%
         group_split(cluster_id, .keep = TRUE) %>%
-        lapply(refine_complete_subclusters, min_recip = min_recip) %>%
+        lapply(refine_complete_subclusters, min_reciprocal_overlap = min_reciprocal_overlap) %>%
         bind_rows()
       
       x <- x %>%
@@ -265,7 +265,7 @@ cluster_cnv_events <- function(df, min_recip = 0.75,
 #' @param by Character vector specifying grouping columns (e.g. dataset,
 #' sample, or patient).
 #' @param cluster_mode Clustering strategy passed to `cluster_cnv_events()`.
-#' @param min_recip Minimum reciprocal overlap threshold.
+#' @param min_reciprocal_overlap Minimum reciprocal overlap threshold.
 #'
 #' @details
 #' The function splits the input data frame according to the grouping
@@ -273,7 +273,7 @@ cluster_cnv_events <- function(df, min_recip = 0.75,
 #'
 #' @return
 #' Data frame with clustered CNV events including the `cluster_id` column.
-cluster_cnv_events_by <- function(df, by = NULL, cluster_mode = c("connected", "complete"), min_recip = 0.75) {
+cluster_cnv_events_by <- function(df, by = NULL, cluster_mode = c("connected", "complete"), min_reciprocal_overlap = 0.75) {
   cluster_mode <- match.arg(cluster_mode)
   required_cols <- c("event_id", "chr", "start", "end", "cnv_state")
   missing_cols <- setdiff(required_cols, colnames(df))
@@ -282,7 +282,7 @@ cluster_cnv_events_by <- function(df, by = NULL, cluster_mode = c("connected", "
   }
   
   if (is.null(by) || length(by) == 0) {
-    out <- cluster_cnv_events(df, min_recip = min_recip, cluster_mode = cluster_mode)
+    out <- cluster_cnv_events(df, min_reciprocal_overlap = min_reciprocal_overlap, cluster_mode = cluster_mode)
     return(out)
   }
   
@@ -295,7 +295,7 @@ cluster_cnv_events_by <- function(df, by = NULL, cluster_mode = c("connected", "
   split_list <- split(df, split_keys)
   
   out <- purrr::imap(split_list, function(subdf, nm) {
-    res <- cluster_cnv_events(subdf, min_recip = min_recip, cluster_mode = cluster_mode)
+    res <- cluster_cnv_events(subdf, min_reciprocal_overlap = min_reciprocal_overlap, cluster_mode = cluster_mode)
     res
   }) %>%
     dplyr::bind_rows()
@@ -394,7 +394,7 @@ summarise_cnv_loci <- function(df, by = NULL,
 #'
 #' @param df Data frame containing CNV events.
 #' @param by Optional grouping variables.
-#' @param min_recip Minimum reciprocal overlap threshold.
+#' @param min_reciprocal_overlap Minimum reciprocal overlap threshold.
 #' @param cluster_mode Clustering strategy ("connected" or "complete").
 #' @param sample_col Column identifying samples.
 #'
@@ -404,13 +404,13 @@ summarise_cnv_loci <- function(df, by = NULL,
 #' * `clustered_events` — CNV events with cluster assignments
 #' * `cnv_locus_summary` — summarised CNV loci
 #'
-run_cnv_locus_analysis <- function(df, by = NULL, min_recip = 0.75, cluster_mode = c("connected", "complete"),sample_col) {
+run_cnv_locus_analysis <- function(df, by = NULL, min_reciprocal_overlap = 0.75, cluster_mode = c("connected", "complete"),sample_col) {
   cluster_mode <- match.arg(cluster_mode)
   
   clustered <- cluster_cnv_events_by(
     df = df,
     by = by,
-    min_recip = min_recip,
+    min_reciprocal_overlap = min_reciprocal_overlap,
    cluster_mode = cluster_mode
   )
 

@@ -5,35 +5,14 @@
 #' Central File where the analysis of a scRNA-seq data from an Embryo dataset is analyzed 
 #' 
 #' @author Pedro Granjo
-#' @date 13-03-2026
+#' @date 23-03-2026
 #' 
 #' 
-
 
 
 #Now the working directory will be the folder that this RScript is located
 setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
 
-#I'm assuming that run file cleaned Claudia and the other document Functions Processing and the other one Petropolous are all
-# in the same folder
-#' @title Installation of missing packages
-#'
-#' @description
-#'  Installs required packages that are not currently installed 
-#' 
-#' @param pkgs packages that you need for your analysis
-#' @param installer type of installation, if it is from Biocondutor e.g(BiocManager::install) or cran
-#' 
-#' 
-install_if_missing <- function(pkgs, installer) {
-  
-  missing <- pkgs[!pkgs %in% rownames(installed.packages())]
-  
-  if (length(missing) > 0) {
-    message("Installing missing packages: ", paste(missing, collapse = ", "))
-    installer(missing)
-  }
-}
 source("~/GitHub/Inferring_aneuploidy/R/Functions_Processing_InferCNV.R")
 source("~/GitHub/Inferring_aneuploidy/R/Score_system.R")
 source("~/GitHub/Inferring_aneuploidy/R/GSVA.R")
@@ -45,7 +24,7 @@ source("~/GitHub/Inferring_aneuploidy/R/GSEA.R")
 ############################################################################### -
 
 ref_dirs <- c("ref1", "ref2", "ref3")
-
+base_dir <- "C:/Users/pmgra/Documents/VUB/InferCNV/TE_cells_Petroupoulous_02172026"
 infer_objs <- discover_infercnv_runs(base_dir,ref_dirs, pattern = "^run\\.final")
 #infer_objs <- discover_infercnv_runs(base_dir,ref_dirs, pattern = "^17_HMM_.*\\.infercnv_obj$")
 
@@ -64,9 +43,14 @@ final_data <- run_fast_cnv_pipeline(infer_objs,max_gap = 80000,
 ############################### Distribution of Gain and Loss #################
 ############################################################################### -
 
+supported_events <- final_data[["cnvs_supported"]]
 
-#columns like cnv_length, cnv_length_mb to the table
-supported_events <- add_additional_columns(supported_events)
+
+# Extract embryo (everything except the last dot and cell number)
+supported_events$embryo <- sub("^(.+)\\.[0-9]+$", "\\1", df$cell_name)
+
+# Extract stage (first part before the first dot)
+supported_events$stage <- sub("^([^\\.]+)\\..*$", "\\1", df$cell_name)
 
 
 ## OVerall CNVs Length
@@ -81,19 +65,13 @@ library(readr)
 load("C:/Users/pmgra/Documents/VUB/InferCNV/chromossome_arms.RData")
 
 #Merge cnv_overlap info with the information that we know about the chromossomes
-cnv_arm_class <- add_chromosome_info(supported_events,
+cnv_total <- add_chromosome_info(supported_events,
                                      chromosome_arms,
                                      chr_col = "chr",
                                      start_col = "start",
                                      end_col = "end") 
 
 
-
-#Add stats about whole chromossome and arm into the df total
-cnv_total <- calculate_cnv_arm_percentages(
-  cnv_arm_class,
-  chromosome_arms
-)
 
 
 plot_df <- cnv_total %>%
@@ -162,7 +140,7 @@ cnv_total <- res[["cnv_table"]]
 info <- data.frame(cell_name = rownames(seurat_obj@meta.data), cell_type = seurat_obj@meta.data$predicted_celltype_singler)
 
 cnv_total <- cnv_total %>%
-  dplyr::left_join(info, by = c("cell_name_new" = "cell_name"))
+  dplyr::left_join(info, by = c("cell_name"))
 
 
 all_events <- cnv_total %>%
@@ -315,7 +293,7 @@ grid.draw(
 
 cnv_filtered <- cnv_filtered[cnv_filtered$cell_type =="TE",, drop = F]
 
-seu <- label_karyotype_from_aneu_table(seurat_obj, cnv_filtered,cell_col = "cell_name_new")
+seu <- label_karyotype_from_aneu_table(seurat_obj, cnv_filtered,cell_col = "cell_name")
 seu <- subset(seu, predicted_celltype_singler == "TE")
 
 
@@ -582,7 +560,7 @@ plot_umap_focus_TE_Pre_with_aneuploid_ring <- function(seurat_obj,
     ) +
     theme_minimal()
 }
-seurat.obj <- label_karyotype_from_aneu_table(seurat_obj, cnv_filtered, cell_col = "cell_name_new")
+seurat.obj <- label_karyotype_from_aneu_table(seurat_obj, cnv_filtered, cell_col = "cell_name")
 
 table(seurat_obj$predicted_celltype_singler)
 

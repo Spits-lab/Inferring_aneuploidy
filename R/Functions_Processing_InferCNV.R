@@ -79,36 +79,16 @@ discover_infercnv_runs <- function(base_dir = NULL,
                                    ref_dirs,
                                    pattern = "^run\\.final") {
   
-  runs <- list()
+  ref_paths <- if (!is.null(base_dir)) file.path(base_dir, ref_dirs) else ref_dirs
+  names(ref_paths) <- ref_dirs
   
-  for (ref in ref_dirs) {
-    if( !is.null(base_dir)){
-      ref_path <- file.path(base_dir, ref)
-    } else{
-      ref_path <- file.path(ref)
-    }
-    
-    
-    files <- list.files(
-      ref_path,
-      pattern = pattern,
-      full.names = TRUE
-    )
-    
-    
-    
-    if (length(files) == 0) {
-      stop(sprintf("No run.final files found in %s", ref_path))
-    }
-    
-    
-    inferobj <- readRDS(files)
-    
-    
-    runs[[ref]] <- inferobj
-  }
+  runs <- lapply(ref_paths, function(ref_path){
+    files <- list.files(ref_path, pattern = pattern, full.names = TRUE)
+    if (length(files) == 0) stop(sprintf("No files matching '%s' found in %s", pattern, ref_path))
+    if (length(files)  > 1) stop(sprintf("Multiple files matching '%s' found in %s", pattern, ref_path))
+    inferobj <- readRDS(files[[1]])
+  })
   
-  runs
 }
 
 
@@ -118,15 +98,27 @@ discover_infercnv_runs <- function(base_dir = NULL,
 #' one row per gene-cell combination.
 #'
 #' @param expr_df A data frame or matrix with genes as rows and cells as columns.
-melt_expr_to_long <- function(expr_df) {
+melt_expr_to_long <- function(expr_df, cell_prefix = "cell_") {
+  
+  if (is.null(rownames(expr_df)) || 
+      all(rownames(expr_df) == as.character(seq_len(nrow(expr_df))))) {
+    stop("expr_df has no meaningful rownames — gene names expected as rownames.")
+  }
+  
   expr_df |>
     tibble::rownames_to_column("gene") |>
-    pivot_longer(
-      cols = -gene,
-      names_to = "cell_name",
+    tidyr::pivot_longer(
+      cols      = -gene,
+      names_to  = "cell_name",
       values_to = "state_raw"
+    ) |>
+    # Strip prefix from cell_name after melting if present — silently skips
+    # cells that don't carry the prefix, so mixed naming is handled safely
+    dplyr::mutate(
+      cell_name = stringr::str_remove(cell_name, paste0("^", cell_prefix))
     )
 }
+
 
 #' Attach genomic coordinates to long-format gene data
 #'
@@ -152,8 +144,14 @@ attach_gene_order <- function(long_df, gene_order) {
     inner_join(by = "gene",
     y = gene_order)
   
-  if (nrow(merged) == 0 & nrow(merged) == nrow(long_df)) {
-    stop("Merge produced empty table — gene names mismatch?")
+  if (nrow(merged) == 0) {
+    stop("Merge produced empty table — gene names may not match between expr and gene_order.")
+  }
+  if (nrow(merged) < nrow(long_df)) {
+    warning(sprintf(
+      "Inner join dropped %d rows — some genes have no coordinate annotation.",
+      nrow(long_df) - nrow(merged)
+    ))
   }
 
   merged
@@ -161,13 +159,31 @@ attach_gene_order <- function(long_df, gene_order) {
 
 
 #' Discretize raw CNV scores into gain, loss, or neutral states
-#'
-#' Converts a continuous CNV score into a categorical CNV state using
-#' mean-plus-minus-\code{k}-standard-deviation thresholds.
+#' 
+#' Converts a continuous inferCNV score into a categorical CNV state using
+#' mean +/- k * SD thresholds computed globally across the input data frame.
+#' 
+#' 
+#' Global thresholding is appropriate here because inferCNV output values are
+#' already centred by the tool's internal smoothing relative to the reference
+#' signal. The neutral state dominates the distribution and anchors the global
+#' mean near the neutral baseline, so gains and losses appear as symmetric
+#' tail deviations. Per-cell thresholding would artificially force every cell
+#' to have calls even in largely euploid cells.
 #'
 #' @param df A data frame containing a numeric \code{state_raw} column.
 #' @param k Numeric multiplier for the standard deviation cutoff. Default is 1.5.
-discretize_cnv_state <- function(df, k =1.5) {
+discretize_cnv_state_infer_cnv <- function(df, k =1.5) {
+  if (!"state_raw" %in% colnames(df)) {
+    stop("Missing required column: state_raw")
+  }
+  if (!is.numeric(df$state_raw)) {
+    stop("state_raw must be numeric")
+  }
+  if (all(is.na(df$state_raw))) {
+    stop("state_raw is entirely NA — check upstream expression extraction")
+  }
+  
   mu <- mean(df$state_raw, na.rm = TRUE)
   sigma <- sd(df$state_raw, na.rm = TRUE)
   
@@ -202,12 +218,13 @@ load_and_prepare_infercnv_reference <- function(infercnv_list) {
     reference <- refs[i]
     melt_expr_to_long(as.data.frame(infercnv_obj[[1]])) |>
       attach_gene_order(infercnv_obj[[2]]) |>
-      discretize_cnv_state() |>
+      discretize_cnv_state_infer_cnv() |>
       dplyr::mutate(reference = reference)
   })
   
   dplyr::bind_rows(res)
 }
+
 
 
 
@@ -353,30 +370,6 @@ merge_nearby_regions <- function(df, max_gap = 100000) {
   
   merged_df
 }
-
-#' Compute reciprocal overlap between two intervals
-#'
-#' Calculates the reciprocal overlap between two genomic intervals as the
-#' minimum overlap fraction relative to each interval length.
-#'
-#' @param start1,end1 Start and end coordinates for the first interval.
-#' @param start2,end2 Start and end coordinates for the second interval.
-#'
-#' @return A numeric value between 0 and 1.
-reciprocal_overlap <- function(start1, end1, start2, end2) {
-  
-  overlap <- max(0, min(end1, end2) - max(start1, start2))
-  
-  if (overlap == 0) {
-    return(0)
-  }
-  
-  len1 <- end1 - start1
-  len2 <- end2 - start2
-  
-  min(overlap / len1, overlap / len2)
-}
-
 
 
 
@@ -598,12 +591,12 @@ summarize_cnv_support <- function(df) {
   stopifnot(all(required %in% colnames(df)))
   
   df |>
-    group_by(cell_name, cnv_equiv_id) |>
+    group_by(cell_name,chr,cnv_state,cnv_equiv_id) |>
     summarise(
-      chr          = dplyr::first(chr),
-      cnv_state    = dplyr::first(cnv_state),
       start        = min(start),
       end          = max(end),
+      cnv_length = end - start + 1,
+      cnv_length_mb = cnv_length / 1e6,
       n_references = n_distinct(reference),
       references   = paste(sort(unique(reference)), collapse = ","),
       .groups = "drop"
@@ -621,7 +614,9 @@ summarize_cnv_support <- function(df) {
 #' @return A filtered data frame of CNV events.
 filter_cnv_events <- function(cnv_events, min_references = 2) {
   
-  stopifnot("n_references" %in% colnames(cnv_events))
+  if (!"n_references" %in% colnames(cnv_events)) {
+    stop("Missing required column: n_references")
+  }
   
   cnv_events |>
     filter(n_references >= min_references)
@@ -638,31 +633,29 @@ filter_cnv_events <- function(cnv_events, min_references = 2) {
 #' @param min_reciprocal_overlap Minimum reciprocal overlap for equivalence
 #'   assignment.
 #' @param min_references Minimum number of references required to keep a CNV.
+#' @param overlap_method Select the overlap method
 run_fast_cnv_pipeline <- function(
     gene_level_df,
     max_gap = 100000,
     min_reciprocal_overlap = 0.5,
-    min_references = 2
+    min_references = 2,
+    overlap_method = "reciprocal"
 ) {
   
   message("→ Collapsing genes to segments")
-  segments <- collapse_genes_to_cnv_segments(gene_level_df)
-  dim(segments)
+  segments <- collapse_genes_to_cnv_segments(gene_cnv_df = gene_level_df)
  
-  
   message("→ Merging nearby CNVs")
-  merged <- merge_nearby_regions(segments, max_gap)
-  
+  merged <- merge_nearby_regions(df = segments, max_gap = max_gap)
+ 
   message("→ Assigning CNV equivalence")
   equiv <- assign_cnv_equivalence(
-    merged,
-    min_reciprocal_overlap,
-    "reciprocal"
+    df = merged,
+    min_reciprocal_overlap = min_reciprocal_overlap,
+    overlap_method = "reciprocal"
   )
   
   cnv_events <- summarize_cnv_support(equiv)
-  
-  n_refs <- length(unique(equiv$reference))
   
   message("→ Filtering CNVs by reference support")
   
@@ -673,11 +666,15 @@ run_fast_cnv_pipeline <- function(
   
   
   list(
-    cnvs_all        = equiv,
-    cnvs_filtered   = cnv_events,
-    cnv_support_tbl = supported_events
+    cnvs_per_segment   = equiv,             # one row per segment, with equiv IDs - IDs which tells which CNVs overlap each other
+    cnvs_summarized    = cnv_events,        # one row per equiv group, with support counts
+    cnvs_supported     = supported_events  # filtered to min_references threshold
   )
 }
+
+
+
+
 
 
 #' Compute overlap in base pairs between two intervals
@@ -690,179 +687,9 @@ overlap_bp <- function(a_start, a_end, b_start, b_end) {
   max(0, min(a_end, b_end) - max(a_start, b_start))
 }
 
-#' Remove a prefix from cell names
-#'
-#' Removes a regular expression prefix from cell identifiers.
-#'
-#' @param cell_names Character vector of cell names.
-#' @param prefix Regular expression prefix to remove. Default is
-#'   \code{"^cell_"}.
-#'
-#' @return Character vector of cleaned cell names.
-clean_cell_name <- function(cell_names, prefix = "^cell_") {
-  sub(prefix, "", cell_names)
-}
-
-
-
-#' Add parsed metadata and CNV length columns
-#'
-#' Adds cleaned cell names, embryo labels, stage labels, and CNV length columns
-#' to a CNV data frame.
-#'
-#' @param df A data frame containing at least \code{cell_name}, \code{start},
-#'   and \code{end}.
-#'
-#' @return The input data frame with added columns:
-#' \code{cell_name_new}, \code{embryo}, \code{stage}, \code{cnv_length}, and
-#' \code{cnv_length_mb}.
-add_additional_columns <- function(df){
-  # Remove the "cell_" prefix first
-  df$cell_name_new <- sub("^cell_", "", df$cell_name)
-  
-  # Extract embryo (everything except the last dot and cell number)
-  df$embryo <- sub("^(.+)\\.[0-9]+$", "\\1", df$cell_name_new)
-  
-  # Extract stage (first part before the first dot)
-  df$stage <- sub("^([^\\.]+)\\..*$", "\\1", df$cell_name_new)
-  
-
-  df <- df %>%
-    mutate(
-      cnv_length = end - start + 1,
-      cnv_length_mb = cnv_length / 1e6
-    )
-  
-  
-  return(df)
-}
-
 
 
 ########################################################
-#Stats Function
-
-#' Add parsed metadata and CNV length columns
-#'
-#' Adds cleaned cell names, embryo labels, stage labels, and CNV length columns
-#' to a CNV data frame.
-#'
-#' @param df A data frame containing at least "cell_name", "start", "end"
-#'
-count_stage_embryo <- function(df, count_name = "count") {
-  
-  df %>%
-    dplyr::distinct(stage, embryo, cell_name) %>%
-    dplyr::group_by(stage, embryo) %>%
-    dplyr::summarise(!!count_name := dplyr::n(), .groups = "drop")
-}
-
-#' Count CNV-positive cells by stage and embryo
-#'
-#' Extracts stage, embryo, and cell information from a CNV table and counts
-#' unique cells per stage-embryo combination.
-#'
-#' @param df A CNV data frame containing "stage","embryo", "cell_name"
-#'
-#' @return A summary data frame with a cnv_count column.
-#'
-get_cnv_counts <- function(df) {
-  
-  cnv_df <- df %>%
-    dplyr::select(stage, embryo, cell_name)
-  
-  count_stage_embryo(cnv_df, count_name = "cnv_count")
-}
-
-#' Count Seurat cells by stage and embryo
-#'
-#' Parses Seurat cell names into embryo and stage labels and counts cells per
-#' stage-embryo combination.
-#'
-#' @param seurat_obj A Seurat object.
-#'
-#' @return A summary data frame with a seurat_count column.
-get_seurat_counts <- function(seurat_obj) {
-  
-  seurat_cells <- data.frame(
-    cell_name = colnames(seurat_obj),
-    stringsAsFactors = FALSE
-  )
-  
-  seurat_cells$cell_name_new <- sub("^cell_", "", seurat_cells$cell_name)
-  seurat_cells$embryo <- sub("^(.+)\\.[0-9]+$", "\\1", seurat_cells$cell_name_new)
-  seurat_cells$stage <- sub("^([^\\.]+)\\..*$", "\\1", seurat_cells$cell_name_new)
-  
-  count_stage_embryo(seurat_cells, count_name = "seurat_count")
-}
-
-#' Merge CNV and Seurat cell count summaries
-#'
-#' Combines embryo-stage count summaries from CNV data and Seurat data.
-#'
-#' @param cnv_counts A data frame of CNV-based counts.
-#' @param seurat_counts A data frame of Seurat-based counts.
-#' @param drop_missing_cnv Logical; if TRUE, rows with missing cnv_count are removed
-#'
-#' @return A merged count table.
-merge_counts <- function(cnv_counts, seurat_counts, drop_missing_cnv = TRUE) {
-  
-  merged <- dplyr::full_join(
-    cnv_counts,
-    seurat_counts,
-    by = c("stage", "embryo")
-  )
-  
-  if (drop_missing_cnv) {
-    merged <- merged[!is.na(merged$cnv_count), ]
-  }
-  
-  return(merged)
-}
-
-
-#' Summarise counts by stage
-#'
-#' Aggregates embryo-level CNV and Seurat counts into stage-level totals.
-#'
-#' @param merged_counts A merged count data frame containing stage,cnv_count, seurat_count columns.
-#'
-#' @return A stage-level summary data frame.
-summarise_by_stage <- function(merged_counts) {
-  
-  merged_counts %>%
-    dplyr::group_by(stage) %>%
-    dplyr::summarise(
-      cnv_total = sum(cnv_count, na.rm = TRUE),
-      seurat_total = sum(seurat_count, na.rm = TRUE),
-      .groups = "drop"
-    )
-}
-
-#' Build embryo-level and stage-level CNV summaries
-#'
-#' Generates embryo-level and stage-level summaries comparing CNV-positive cells
-#' with all Seurat cells.
-#'
-#' @param dfs A CNV data frame.
-#' @param seurat_obj A Seurat object.
-make_embryo_stage_summary <- function(dfs, seurat_obj) {
-  
-  cnv_counts <- get_cnv_counts(dfs)
-
-  seurat_counts <- get_seurat_counts(seurat_obj)
-
-  merged_counts <- merge_counts(cnv_counts, seurat_counts)
-
-  stage_summary <- summarise_by_stage(merged_counts)
-  
-  
-  return(list(
-    embryo_level = merged_counts,
-    stage_level  = stage_summary
-  ))
-}
-
 
 
 #' Classify a CNV by chromosome arm overlap
@@ -873,6 +700,16 @@ make_embryo_stage_summary <- function(dfs, seurat_obj) {
 #' @param cnv_row A single-row data frame representing one CNV.
 #' @param chromosome_arms A data frame describing chromosome arm intervals.
 classify_single_cnv <- function(cnv_row, chromosome_arms) {
+  
+  required_cnv  <- c("chr", "start", "end")
+  required_arms <- c("chr", "arm_start", "arm_end", "arm")
+  
+  missing_cnv  <- setdiff(required_cnv,  colnames(cnv_row))
+  missing_arms <- setdiff(required_arms, colnames(chromosome_arms))
+  
+  if (length(missing_cnv)  > 0) stop("cnv_row missing columns: ",        paste(missing_cnv,  collapse = ", "))
+  if (length(missing_arms) > 0) stop("chromosome_arms missing columns: ", paste(missing_arms, collapse = ", "))
+  
   
   arms <- chromosome_arms[chromosome_arms$chr == cnv_row$chr, ]
   
@@ -923,41 +760,53 @@ classify_single_cnv <- function(cnv_row, chromosome_arms) {
 #' @return The input CNV data frame with an added arm_class column.
 classify_cnv_arms <- function(cnv_df, chromosome_arms) {
   
+  required_cnv  <- c("chr", "start", "end")
+  required_arms <- c("chr", "arm_start", "arm_end", "arm")
+  
+  missing_cnv  <- setdiff(required_cnv,  colnames(cnv_df))
+  missing_arms <- setdiff(required_arms, colnames(chromosome_arms))
+  
+  if (length(missing_cnv)  > 0) stop("cnv_row missing columns: ",        paste(missing_cnv,  collapse = ", "))
+  if (length(missing_arms) > 0) stop("chromosome_arms missing columns: ", paste(missing_arms, collapse = ", "))
+  
+  # Validate arm labels once here — not inside the per-row function
+  valid_arms    <- c("p", "q", "cen")
+  unexpected    <- setdiff(unique(chromosome_arms$arm), valid_arms)
+  if (length(unexpected) > 0) {
+    warning(
+      "Unexpected arm labels in chromosome_arms: ",
+      paste(unexpected, collapse = ", "),
+      ". Expected: ", paste(valid_arms, collapse = ", ")
+    )
+  }
+  
+  if (nrow(cnv_df) == 0L) {
+    warning("cnv_df is empty — returning with arm_class column set to NA.")
+    cnv_df$arm_class <- NA_character_
+    return(cnv_df)
+  }
+  
+  arms_by_chr <- split(chromosome_arms, chromosome_arms$chr)
+  
   cnv_df$arm_class <- vapply(
     seq_len(nrow(cnv_df)),
-    function(i) classify_single_cnv(cnv_df[i, ], chromosome_arms),
+    function(i) {
+      chr_arms <- arms_by_chr[[cnv_df$chr[i]]]
+      if (is.null(chr_arms)) return(NA_character_)
+      classify_single_cnv(cnv_df[i, ], chr_arms)
+    },
     character(1)
   )
   
+  na_rate <- mean(is.na(cnv_df$arm_class))
+  if (na_rate > 0.1) {
+    warning(sprintf(
+      "%.1f%% of CNVs could not be arm-classified — check chromosome naming convention.",
+      na_rate * 100
+    ))}
+    
   return(cnv_df)
 }
-
-#' Add chromosome arm classification to a CNV table
-#'
-#' Validates coordinate columns and annotates CNVs with chromosome arm classes.
-#'
-#' @param main_df A CNV data frame.
-#' @param chromosome_arms A chromosome arm annotation table.
-#' @param chr_col Name of the chromosome column.
-#' @param start_col Name of the interval start column.
-#' @param end_col Name of the interval end column.
-#'
-#' @return The input data frame with arm classification added.
-add_chromosome_info <- function(main_df,
-                                chromosome_arms,
-                                chr_col = "chr",
-                                start_col = "start",
-                                end_col = "end") {
-  
-  required_cols <- c(chr_col, start_col, end_col)
-  
-  if (!all(required_cols %in% colnames(main_df))) {
-    stop("Missing required CNV coordinate columns.")
-  }
-  
-  classify_cnv_arms(main_df, chromosome_arms)
-}
-
 
 
 #' Calculate chromosome and arm-level CNV coverage percentages
@@ -1025,6 +874,49 @@ calculate_cnv_arm_percentages <- function(cnv_df, chromosome_arms) {
   
   return(cnv_total)
 }
+
+
+
+#' Add chromosome arm classification and percentages to a CNV table
+#'
+#' Validates coordinate columns and annotates CNVs with chromosome arm classes.
+#'
+#' @param main_df A CNV data frame.
+#' @param chromosome_arms A chromosome arm annotation table.
+#' @param chr_col Name of the chromosome column.
+#' @param start_col Name of the interval start column.
+#' @param end_col Name of the interval end column.
+#'
+#' @return The input data frame with arm classification added.
+add_chromosome_info <- function(main_df,
+                                chromosome_arms,
+                                chr_col = "chr",
+                                start_col = "start",
+                                end_col = "end") {
+  
+  required_cols <- c(chr_col, start_col, end_col)
+  
+  if (!all(required_cols %in% colnames(main_df))) {
+    stop("Missing required CNV coordinate columns.")
+  }
+  
+  cnv_df <- classify_cnv_arms(main_df, chromosome_arms)
+  
+  missing_chr <- setdiff(cnv_df$chr,chromosome_arms$chr)
+  
+  if (any(missing_chr)) {
+    message(message("Skipping chromosomes which are not present in cnv_df: ", paste(missing_chr, collapse = ", ")))
+  }
+  
+  cnv_df <- cnv_df %>%
+    filter(chr %in% chromosome_arms$chr)
+  
+  whole_chr_info <- calculate_cnv_arm_percentages(cnv_df, chromosome_arms)
+  return(whole_chr_info) 
+}
+
+
+
 
 
 #' Plot the density distribution of CNV lengths

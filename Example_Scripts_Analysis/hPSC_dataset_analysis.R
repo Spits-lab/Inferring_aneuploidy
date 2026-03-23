@@ -256,20 +256,13 @@ supported_events <- bind_rows(integrated_res$across_only,
 
 supported_events <- add_additional_columns(supported_events)
 
-cnv_arm_class <- add_chromosome_info(supported_events,
+cnv_total <- add_chromosome_info(supported_events,
                                      chromosome_arms,
                                      chr_col = "chr",
                                      start_col = "start",
                                      end_col = "end") 
 
-#Add stats about whole chromossome and arm into the df total
-cnv_arm_class <- cnv_arm_class %>%
-  filter(chr %in% chromosome_arms$chr)
 
-cnv_total <- calculate_cnv_arm_percentages(
-  cnv_arm_class,
-  chromosome_arms
-)
 
 ########################################################################### -
 ################## Filtered and Scoring of CNV segments ###################

@@ -378,70 +378,200 @@ reciprocal_overlap <- function(start1, end1, start2, end2) {
 }
 
 
-#' Assign equivalence groups to CNV events
+
+
+#' Compute pairwise overlap scores using a named strategy
 #'
-#' Groups CNV segments into equivalence classes within each cell, chromosome,
-#' and CNV state based on reciprocal overlap.
+#' Acts as the single entry point for all overlap methods. Individual strategies
+#' are defined as internal nested functions — adding a new strategy means adding
+#' a nested function here and registering it in the registry, nothing else changes
+#' in the pipeline.
 #'
-#' @param df A data frame containing CNV segments.
-#' @param min_reciprocal_overlap Minimum reciprocal overlap required for two
-#'   consecutive segments to belong to the same equivalence group.
-assign_cnv_equivalence <- function(df, min_reciprocal_overlap = 0.5) {
+#' @param q_start,q_end Integer vectors. Query segment coordinates.
+#' @param s_start,s_end Integer vectors. Subject segment coordinates.
+#' @param method Character string naming the overlap strategy to use.
+#'   One of "reciprocal", "jaccard", "symmetric_reciprocal".
+#'
+#' @return Numeric vector of overlap scores in [0, 1], same length as inputs.
+compute_overlap <- function(q_start, q_end, s_start, s_end, method = "reciprocal") {
   
-  required <- c("cell_name", "chr", "cnv_state", "start", "end")
-  if (!all(required %in% colnames(df))) {
-    stop("Missing required columns")
+  # --- Internal strategy definitions ---------------------------------------
+  # Each function shares the same signature and returns a numeric vector in [0,1]
+  # Add new strategies here as additional nested functions + registry entry
+  
+  .reciprocal <- function(q_start, q_end, s_start, s_end) {
+    intersection_len <- pmax(0L, pmin(q_end, s_end) - pmax(q_start, s_start) + 1L)
+    q_len            <- q_end - q_start + 1L
+    s_len            <- s_end - s_start + 1L
+    intersection_len / pmin(q_len, s_len)
   }
   
+  .jaccard <- function(q_start, q_end, s_start, s_end) {
+    intersection_len <- pmax(0L, pmin(q_end, s_end) - pmax(q_start, s_start) + 1L)
+    q_len            <- q_end - q_start + 1L
+    s_len            <- s_end - s_start + 1L
+    union_len        <- q_len + s_len - intersection_len
+    intersection_len / union_len
+  }
+  
+  .symmetric_reciprocal <- function(q_start, q_end, s_start, s_end) {
+    intersection_len <- pmax(0L, pmin(q_end, s_end) - pmax(q_start, s_start) + 1L)
+    q_len            <- q_end - q_start + 1L
+    s_len            <- s_end - s_start + 1L
+    (intersection_len / q_len + intersection_len / s_len) / 2
+  }
+  
+  # --- Internal registry ---------------------------------------------------
+  # Maps method name strings to their corresponding internal functions
+  
+  .registry <- list(
+    reciprocal           = .reciprocal,
+    jaccard              = .jaccard,
+    symmetric_reciprocal = .symmetric_reciprocal
+  )
+  
+  # --- Validate and dispatch -----------------------------------------------
+  
+  valid_methods <- names(.registry)
+  if (!method %in% valid_methods) {
+    stop(
+      "Unknown overlap method: '", method, "'. ",
+      "Valid options are: ", paste(valid_methods, collapse = ", ")
+    )
+  }
+  
+  .registry[[method]](q_start, q_end, s_start, s_end)
+}
+
+
+
+#' Assign CNV equivalence IDs using overlap-graph connected components
+#'
+#' For each (cell_name, chr, cnv_state) group, segments that mutually satisfy
+#' the reciprocal overlap threshold are assigned the same cnv_equiv_id via
+#' connected-component clustering. Overlap is computed on ORIGINAL segment
+#' coordinates, not an expanding window, to avoid transitive chaining bias.
+#'
+#' @param df A data frame with columns: cell_name, chr, cnv_state, start, end.
+#' @param min_reciprocal_overlap Minimum reciprocal overlap to consider two
+#'   segments equivalent. Default 0.5.
+#'
+#' @return The input data frame with an added integer column `cnv_equiv_id`.
+#'   IDs are globally unique across all groups.
+assign_cnv_equivalence <- function(df, min_reciprocal_overlap = 0.5, overlap_method  = "reciprocal") {
+  
+  required_cols <- c("cell_name", "chr", "cnv_state", "start", "end")
+  missing_cols  <- setdiff(required_cols, colnames(df))
+  if (length(missing_cols) > 0) {
+    stop("Missing required columns: ", paste(missing_cols, collapse = ", "))
+  }
+  
+  # Validate coordinate integrity before doing any interval arithmetic
+  if (any(df$start > df$end, na.rm = TRUE)) {
+    stop("Detected rows where start > end. Check upstream segmentation.")
+  }
+  
+  # Sort once globally — findOverlaps requires sorted GRanges
   df <- df |>
-    arrange(cell_name, chr, cnv_state, start)
+    dplyr::arrange(cell_name, chr, cnv_state, start)
   
-  df$cnv_equiv_id <- NA_integer_
+  # Global equiv ID counter — incremented per connected component across
+  # all groups so IDs are unique in the output dataframe
+  global_equiv_counter <- 0L
+  df$cnv_equiv_id      <- NA_integer_
   
-  equiv_counter <- 0
+  # Split into (cell_name x chr x cnv_state) groups
+  # We retain row indices into the original df to avoid the which() lookup
+  group_indices <- df |>
+    dplyr::mutate(.row_idx = dplyr::row_number()) |>
+    dplyr::group_by(cell_name, chr, cnv_state) |>
+    dplyr::group_split()
   
-  #This split in least for each cell, each chromossome and each state
-  grouped <- df |>
-    group_split(cell_name, chr, cnv_state)
-  
-  for (group in grouped) {
+  for (grp in group_indices) {
     
-    current_start <- NULL
-    current_end   <- NULL
+    n <- nrow(grp)
     
-    for (i in seq_len(nrow(group))) {
-      
-      row_idx <- which(df$cell_name == group$cell_name[i] &
-                         df$chr       == group$chr[i] &
-                         df$cnv_state == group$cnv_state[i] &
-                         df$start     == group$start[i] &
-                         df$end       == group$end[i])[1]
-      
-      if (is.null(current_start)) {
-        # first CNV in this group
-        equiv_counter <- equiv_counter + 1
-        current_start <- group$start[i]
-        current_end   <- group$end[i]
-      } else {
-        
-        ro <- reciprocal_overlap(
-          current_start, current_end,
-          group$start[i], group$end[i]
-        )
-        
-        if (ro < min_reciprocal_overlap) {
-          # start new equivalence group
-          equiv_counter <- equiv_counter + 1
-          current_start <- group$start[i]
-          current_end   <- group$end[i]
-        } else {
-          # extend current equivalence interval
-          current_end <- max(current_end, group$end[i])
-        }
-      }
-      
-      df$cnv_equiv_id[row_idx] <- equiv_counter
+    # Single-segment group: trivially its own equivalence class
+    if (n == 1L) {
+      global_equiv_counter <- global_equiv_counter + 1L
+      df$cnv_equiv_id[grp$.row_idx] <- global_equiv_counter
+      next
     }
+    
+    # Build a GRanges for this group using original (unextended) coordinates
+    # We use seq_along as names so we can recover indices after findOverlaps
+    gr <- GenomicRanges::GRanges(
+      seqnames = grp$chr,
+      ranges   = IRanges::IRanges(start = grp$start, end = grp$end),
+      strand   = "*"
+    )
+    names(gr) <- as.character(seq_len(n))
+    
+    # Find all pairwise overlaps within this group
+    # type = "any" catches partial overlaps; we filter by RO threshold below
+    hits <- GenomicRanges::findOverlaps(gr, gr, type = "any", select = "all")
+    
+    # Remove self-hits
+    hits <- hits[S4Vectors::queryHits(hits) != S4Vectors::subjectHits(hits)]
+    
+    if (length(hits) == 0L) {
+      # No overlaps at all — every segment is its own equivalence class
+      new_ids <- seq(
+        from = global_equiv_counter + 1L,
+        by   = 1L,
+        length.out = n
+      )
+      df$cnv_equiv_id[grp$.row_idx] <- new_ids
+      global_equiv_counter <- global_equiv_counter + n
+      next
+    }
+    
+    q_idx <- S4Vectors::queryHits(hits)
+    s_idx <- S4Vectors::subjectHits(hits)
+    
+    # Replace the previous overlap_fn() call with:
+    scores <- compute_overlap(
+      q_start = grp$start[q_idx],
+      q_end   = grp$end[q_idx],
+      s_start = grp$start[s_idx],
+      s_end   = grp$end[s_idx],
+      method  = overlap_method
+    )
+    
+    # Keep only pairs that meet the reciprocal overlap threshold
+    passing <- scores >= min_reciprocal_overlap
+    q_pass  <- q_idx[passing]
+    s_pass  <- s_idx[passing]
+    
+    if (length(q_pass) == 0L) {
+      # Overlaps exist but none pass the threshold — all separate classes
+      new_ids <- seq(
+        from = global_equiv_counter + 1L,
+        by   = 1L,
+        length.out = n
+      )
+      df$cnv_equiv_id[grp$.row_idx] <- new_ids
+      global_equiv_counter <- global_equiv_counter + n
+      next
+    }
+    
+    # Connected components on the overlap graph
+    # Each node is a segment (1..n), edges connect segments that pass RO
+    # Components define equivalence classes — no sequential walk, no chaining
+    g <- igraph::graph_from_edgelist(
+      cbind(q_pass, s_pass),
+      directed = FALSE
+    )
+    
+    # Add isolated vertices (segments with no passing overlaps) so every
+    # segment gets a component assignment
+    g <- igraph::add_vertices(g, n - igraph::vcount(g))
+    
+    component_ids <- igraph::components(g)$membership
+    
+    # Offset component IDs by the global counter to ensure global uniqueness
+    df$cnv_equiv_id[grp$.row_idx] <- component_ids + global_equiv_counter
+    global_equiv_counter <- global_equiv_counter + max(component_ids)
   }
   
   df
@@ -526,7 +656,8 @@ run_fast_cnv_pipeline <- function(
   message("→ Assigning CNV equivalence")
   equiv <- assign_cnv_equivalence(
     merged,
-    min_reciprocal_overlap
+    min_reciprocal_overlap,
+    "reciprocal"
   )
   
   cnv_events <- summarize_cnv_support(equiv)
@@ -537,7 +668,7 @@ run_fast_cnv_pipeline <- function(
   
   supported_events <- filter_cnv_events(
     cnv_events,
-    min_references = 2
+    min_references = min_references
   )
   
   

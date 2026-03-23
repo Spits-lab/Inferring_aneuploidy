@@ -238,7 +238,7 @@ load("C:/Users/pmgra/Documents/VUB/InferCNV/chromossome_arms.RData")
 #Merge cnv_overlap info with the information that we know about the chromossomes
 
 #reading rds object which is the initial processing phase seen above
-integrated_res <- readRDS("~/VUB/FWO_Claudia/integrated_across_within_common_minRecip0.75.rds")
+integrated_res <- readRDS("C:/Users/pmgra/Documents/VUB/2026_03_FWO_Claudia/integrated_across_within_common_minRecip0.75.rds")
 
 
 pairs_common_clean <- integrated_res$pairs_common %>%
@@ -324,9 +324,12 @@ res_scores <- score_cnv_clusters(
 
 cnv_filtered <- res_scores %>% 
   filter(confidence == "high")
+cnv_filtered$
 
-
-
+table_df <- cnv_filtered[,c("cell_name","dataset")]
+df <- df  %>% distinct()
+table(cnv_filtered$dataset,cnv_filtered$mode)
+View(distinct(df))
 ########################################################################### -
 ##############################Chromossome Ploting##########################
 ############################################################################ -

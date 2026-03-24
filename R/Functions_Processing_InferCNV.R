@@ -11,8 +11,9 @@
 
 # Package groups
 cran_packages <- c(
-  "dplyr", "tidyr", "data.table", "ggplot2", "patchwork", "cowplot"
+  "dplyr", "tidyr", "data.table", "cowplot", "igraph", "BiocManager", "purrr"
 )
+
 
 bioc_packages <- c(
   "GenomicRanges", "IRanges"
@@ -302,8 +303,8 @@ collapse_genes_to_cnv_segments <- function(gene_cnv_df) {
 #'   Default is 100000.
 #'
 #' @return A data frame of merged CNV regions.
-merge_nearby_regions <- function(df, max_gap = 100000) {
-  # ---- schema validation (minimal, mirrors Python intent) ----
+merge_nearby_regions <- function(df, max_gap = 100000, filter_seq_mb = 5, debug = FALSE) {
+  # ---- Input validation ---------------------------------------------------
   required <- c("reference", "cell_name", "chr", "state", "start", "stop")
   if (!all(required %in% colnames(df))) {
     stop("Missing required columns")
@@ -317,55 +318,110 @@ merge_nearby_regions <- function(df, max_gap = 100000) {
     stop("Null values detected in CNV table")
   }
   
-  # ---- ensure genomic ordering ----
-  df <- df |>
-    arrange(reference, cell_name, chr, state, start)
+  n_input <- nrow(df)
   
-  # ---- core merging logic ----
-  merged_df <- df |>
-    group_by(reference, cell_name, chr, state) |>
-    arrange(start, .by_group = TRUE) |>
+  # ---- Pre-filter ---------------------------------------------------------
+  df <- df |>
+    arrange(reference, cell_name, chr, state, start) %>%
+    mutate(cnv_length = as.numeric(stop) - as.numeric(start) + 1,
+           cnv_length_mb = cnv_length / 1e6) %>%
+    filter(cnv_length_mb > filter_seq_mb)
+  
+  n_postfilter <- nrow(df)
+  
+  message(sprintf(
+    "A total of %d initial rows →  retained %d with length > %.0f Mb",
+    n_input,
+    n_postfilter,
+    filter_seq_mb
+  ))
+  
+  # ---- Core merging logic -------------------------------------------------
+  merged_df <- df %>%
+    group_by(reference, cell_name, chr, state) %>%
+    arrange(start, .by_group = TRUE) %>%
     mutate(
       gap = start - lag(stop),
       new_block = is.na(gap) | gap > max_gap,
       merge_id = cumsum(new_block)
-    ) |>
-    group_by(reference, cell_name, chr, state, merge_id) |>
+    ) %>%
+    group_by(reference, cell_name, chr, state, merge_id) %>%
     summarise(
-      cnv_state  = dplyr::first(state),
       start      = min(start),
       end        = max(stop),
       n_segments = n(),
       .groups    = "drop"
-    )
+    ) %>%
+    # Rename state → cnv_state here — single clean rename, no duplicate columns
+    dplyr::rename(cnv_state = state) %>%
+    dplyr::select(-merge_id) %>%
+    dplyr::arrange(reference, cell_name, chr, cnv_state, start)
   
-  # ---- post-merge sanity check ----
-  merged_df <- merged_df |>
-    arrange(reference, cell_name, chr, cnv_state, start)
+
+  # ---- Sanity checks ------------------------------------------------------
+  n_merged <- nrow(merged_df)
+  # Check 1: merge summary reporting
+  message(sprintf(paste0(
+    "Merge summary:\n",
+    "  Input (post pre-filter):  %d rows\n",
+    "  After merging:            %d rows\n",
+    "  Reduction:                %d rows (%.1f%%)"
+  ),
+  n_postfilter,
+  n_merged,
+  n_postfilter - n_merged,
+  100 * (n_postfilter - n_merged) / n_postfilter
+  ))
   
-  overlap <- merged_df |>
-    group_by(reference, cell_name, chr, cnv_state) |>
-    mutate(overlap = start <= lag(end)) |>
-    filter(!is.na(overlap) & overlap)
-  
-  if (nrow(overlap) > 0) {
-    stop("Overlapping CNVs detected within the same CNV state")
+  # Check 2: warn if merging produced no reduction
+  # Not an error — valid if all segments are already well separated
+  if (n_merged == n_postfilter) {
+    warning(sprintf(
+      "No reduction after merging: before = %d, after = %d. ",
+      "max_gap = %d may be too small for this dataset.",
+      n_postfilter, n_merged, max_gap
+    ))
   }
   
-  # ---- sanity check: row reduction ----
-  n_before <- nrow(df)
-  n_after  <- nrow(merged_df)
+  # Check 3: empty output guard
+  if (n_merged == 0L) {
+    stop("No segments remain after merging. Check max_gap and filter_seq_mb.")
+  }
   
-  if (n_after < n_before) {
-    message(sprintf(
-      "CNV segments merged successfully: before = %d rows, after = %d rows",
-      n_before, n_after
-    ))
-  } else {
-    warning(sprintf(
-      "No reduction in CNV rows after merging: before = %d, after = %d",
-      n_before, n_after
-    ))
+  # Check 4: coordinate integrity after merging
+  if (any(merged_df$start >= merged_df$end, na.rm = TRUE)) {
+    stop("Merged segments have start >= end. Check summarise logic.")
+  }
+  
+  # Check 5: no NA in key output columns
+  key_cols  <- c("reference", "cell_name", "chr", "cnv_state", "start", "end")
+  na_counts <- colSums(is.na(merged_df[, key_cols]))
+  if (any(na_counts > 0L)) {
+    stop(
+      "NA values in output columns after merging: ",
+      paste(names(na_counts[na_counts > 0L]), collapse = ", ")
+    )
+  }
+  
+  # Check 6: n_segments should always be >= 1
+  if (any(merged_df$n_segments < 1L, na.rm = TRUE)) {
+    stop("Merged segments with n_segments < 1 detected. Check summarise logic.")
+  }
+  
+  # Check 7: overlap detection 
+  if (debug) {
+    overlap <- merged_df |>
+      dplyr::group_by(reference, cell_name, chr, cnv_state) |>
+      dplyr::mutate(overlaps_prev = start <= dplyr::lag(end)) |>
+      dplyr::filter(!is.na(overlaps_prev) & overlaps_prev)
+    
+    if (nrow(overlap) > 0L) {
+      stop(sprintf(
+        "%d overlapping segment pair(s) detected after merging. Check merging logic.",
+        nrow(overlap)
+      ))
+    }
+    message("Debug: no overlapping segments detected after merging.")
   }
   
   merged_df
@@ -396,7 +452,7 @@ compute_overlap <- function(q_start, q_end, s_start, s_end, method = "reciprocal
     intersection_len <- pmax(0L, pmin(q_end, s_end) - pmax(q_start, s_start) + 1L)
     q_len            <- q_end - q_start + 1L
     s_len            <- s_end - s_start + 1L
-    intersection_len / pmin(q_len, s_len)
+    intersection_len / pmax(q_len, s_len)
   }
   
   .jaccard <- function(q_start, q_end, s_start, s_end) {
@@ -438,139 +494,344 @@ compute_overlap <- function(q_start, q_end, s_start, s_end, method = "reciprocal
 
 
 
-#' Assign CNV equivalence IDs using overlap-graph connected components
-#'
-#' For each (cell_name, chr, cnv_state) group, segments that mutually satisfy
-#' the reciprocal overlap threshold are assigned the same cnv_equiv_id via
-#' connected-component clustering. Overlap is computed on ORIGINAL segment
-#' coordinates, not an expanding window, to avoid transitive chaining bias.
-#'
-#' @param df A data frame with columns: cell_name, chr, cnv_state, start, end.
-#' @param min_reciprocal_overlap Minimum reciprocal overlap to consider two
-#'   segments equivalent. Default 0.5.
-#'
-#' @return The input data frame with an added integer column `cnv_equiv_id`.
-#'   IDs are globally unique across all groups.
-assign_cnv_equivalence <- function(df, min_reciprocal_overlap = 0.5, overlap_method  = "reciprocal") {
+
+
+find_maximal_cliches <- function(q_pass, s_pass, n, grp){
+  
+  # ---- Maximal clique assignment ------------------------------------------
+  # Maximal cliques guarantee every pair within a group directly passes
+  # the overlap threshold — no transitive chaining
+  total_duplicated <- 0L
+  connected_idx <- unique(c(q_pass, s_pass))
+  isolated_idx  <- setdiff(seq_len(n), connected_idx)
+  
+  g <- igraph::graph_from_edgelist(
+    cbind(as.character(q_pass), as.character(s_pass)),
+    directed = FALSE
+  )
+  
+  cliques <- igraph::max_cliques(g)
+  
+  # Build a mapping: local segment index → vector of clique IDs it belongs to
+  # A segment in one clique gets one ID
+  # A segment in multiple cliques gets one row per clique — duplicated
+  segment_clique_map <- vector("list", n)
+  
+  for (k in seq_along(cliques)) {
+    members <- as.integer(names(cliques[[k]]))
+    for (m in members) {
+      segment_clique_map[[m]] <- c(segment_clique_map[[m]], k)
+    }
+  }
+  
+  # Count duplicated segments — those appearing in more than one clique
+  n_duplicated <- sum(vapply(
+    segment_clique_map[connected_idx],
+    function(x) length(x) > 1L,
+    logical(1)
+  ))
+  
+  total_duplicated <- total_duplicated + n_duplicated
+  
+  # Build output rows for this group
+  # Each segment is emitted once per clique it belongs to
+  # Isolated segments (no passing overlap partner) are dropped — NA equiv_id
+  group_output <- vector("list", length(connected_idx))
+  unresolved_row <- c()
+  for (j in seq_along(connected_idx)) {
+    seg_idx    <- connected_idx[j]
+    clique_ids <- segment_clique_map[[seg_idx]]
+    
+    if (is.null(clique_ids) || length(clique_ids) == 0L) {
+      # Connected but assigned to no clique — should not happen, guard only
+      unresolved_row <- grp[seg_idx, ]
+      unresolved_row$removal_reason <- "unresolved_clique"
+      unresolved_rows[[j]] <- unresolved_row
+      next
+    }
+    
+    # One row per clique membership, with globally unique equiv ID
+    seg_rows <- grp[rep(seg_idx, length(clique_ids)), ]
+    seg_rows$local_clique_id <- clique_ids
+    group_output[[j]] <- seg_rows
+  }
+  
+  isolated_rows <- grp[isolated_idx, ]
+  isolated_rows$removal_reason <- "isolated"
+  
+  if (!is.null(unresolved_row)){
+    removed_log <- bind_rows(unresolved_row,isolated_rows)
+  }else{
+    removed_log <- bind_rows(isolated_rows)
+  }
+  
+  
+  return(list(rows =  dplyr::bind_rows(group_output), 
+              n_duplicated = total_duplicated, removed = removed_log))
+}
+
+
+process_cnv_cluster <- function(grp,overlap_method,min_reciprocal_overlap){
+  n   <- nrow(grp)
+  
+  # Single-segment group — trivially its own equivalence class
+  if (n == 1L) {
+    removed_log <- grp
+    removed_log$removal_reason <- "single_sequence"
+    grp$local_clique_id <- seq_len(n)
+    return(list(rows = grp[0, ], n_duplicated = 0L, removed = removed_log))
+  }
+  
+  gr <- GenomicRanges::GRanges(
+    seqnames = grp$chr,
+    ranges   = IRanges::IRanges(start = grp$start, end = grp$end),
+    strand   = "*"
+  )
+  names(gr) <- as.character(seq_len(n))
+  
+  hits <- GenomicRanges::findOverlaps(gr, gr, type = "any", select = "all")
+  hits <- hits[S4Vectors::queryHits(hits) != S4Vectors::subjectHits(hits)]
+  
+  if (length(hits) == 0L) {
+    removed_log <- grp
+    removed_log$removal_reason <- "0 hits"
+    grp$local_clique_id <- seq_len(n)
+    return(list(rows = grp[0,], n_duplicated = 0L, removed = removed_log))
+  }
+  
+  q_idx <- S4Vectors::queryHits(hits)
+  s_idx <- S4Vectors::subjectHits(hits)
+  
+  scores <- compute_overlap(
+    q_start = grp$start[q_idx],
+    q_end   = grp$end[q_idx],
+    s_start = grp$start[s_idx],
+    s_end   = grp$end[s_idx],
+    method  = overlap_method
+  )
+  
+  passing <- scores >= min_reciprocal_overlap
+  q_pass  <- q_idx[passing]
+  s_pass  <- s_idx[passing]
+  
+  
+  if (length(q_pass) == 0L) {
+    # Overlaps exist but none pass threshold — all separate classes
+    removed_log <- grp
+    removed_log$removal_reason <- "inconsistent overall with the selected threshold"
+    grp$local_clique_id <- seq_len(n)
+    return(list(rows = grp[0,], n_duplicated = 0L, removed = removed_log))
+  }
+  
+  res <- find_maximal_cliches(q_pass, s_pass, n, grp)
+  
+  return(res)
+  
+}
+
+
+
+
+assign_cnv_equivalence <- function(
+    df,
+    min_reciprocal_overlap = 0.5,
+    overlap_method         = "reciprocal",
+    filter_seq_mb          = 7,
+    parallel               = FALSE,
+    n_cores = 1L
+) {
   
   required_cols <- c("cell_name", "chr", "cnv_state", "start", "end")
+  missing_cols  <- setdiff(required_cols, colnames(df))
+  
+  # ---- Input validation ---------------------------------------------------
+  required_cols <- c("cell_name", "chr", "cnv_state", "start", "end", "reference")
   missing_cols  <- setdiff(required_cols, colnames(df))
   if (length(missing_cols) > 0) {
     stop("Missing required columns: ", paste(missing_cols, collapse = ", "))
   }
-  
-  # Validate coordinate integrity before doing any interval arithmetic
   if (any(df$start > df$end, na.rm = TRUE)) {
     stop("Detected rows where start > end. Check upstream segmentation.")
   }
   
-  # Sort once globally — findOverlaps requires sorted GRanges
-  df <- df |>
-    dplyr::arrange(cell_name, chr, cnv_state, start)
+  # ---- Pre-filter ---------------------------------------------------------
+  n_rows_input <- nrow(df)
   
-  # Global equiv ID counter — incremented per connected component across
-  # all groups so IDs are unique in the output dataframe
-  global_equiv_counter <- 0L
-  df$cnv_equiv_id      <- NA_integer_
+  df <- df |>
+    dplyr::arrange(cell_name, chr, cnv_state, start) |>
+    dplyr::mutate(
+      cnv_length    = end - start + 1L,
+      cnv_length_mb = cnv_length / 1e6
+    ) |>
+    dplyr::filter(cnv_length_mb > filter_seq_mb)
+  
+  n_rows_postfilter <- nrow(df)
+  n_rows_removed    <- n_rows_input - n_rows_postfilter
+  
+  message(sprintf(
+    "Pre-filter: %d input rows → %d retained (%.1f%% removed) with length > %.0f Mb",
+    n_rows_input,
+    n_rows_postfilter,
+    100 * n_rows_removed / n_rows_input,
+    filter_seq_mb
+  ))
+  
+  if (n_rows_postfilter == 0L) {
+    stop(sprintf(
+      "No segments remain after length filter (> %.0f Mb). ",
+      "Consider lowering filter_seq_mb (currently %.0f).",
+      filter_seq_mb, filter_seq_mb
+    ))
+  }
+  
+  # ---- Split into groups --------------------------------------------------
   
   # Split into (cell_name x chr x cnv_state) groups
-  # We retain row indices into the original df to avoid the which() lookup
   group_indices <- df |>
     dplyr::mutate(.row_idx = dplyr::row_number()) |>
     dplyr::group_by(cell_name, chr, cnv_state) |>
     dplyr::group_split()
   
-  for (grp in group_indices) {
-    
-    n <- nrow(grp)
-    
-    # Single-segment group: trivially its own equivalence class
-    if (n == 1L) {
-      global_equiv_counter <- global_equiv_counter + 1L
-      df$cnv_equiv_id[grp$.row_idx] <- global_equiv_counter
-      next
-    }
-    
-    # Build a GRanges for this group using original (unextended) coordinates
-    # We use seq_along as names so we can recover indices after findOverlaps
-    gr <- GenomicRanges::GRanges(
-      seqnames = grp$chr,
-      ranges   = IRanges::IRanges(start = grp$start, end = grp$end),
-      strand   = "*"
+  
+  message(sprintf("Processing %d groups (cell x chr x cnv_state combinations)",
+                  length(group_indices)))
+  
+  # ---- Step 1: process groups ---------------------------------------------
+  
+  if (parallel) {
+    results <- BiocParallel::bplapply(
+      group_indices,
+      process_cnv_cluster,
+      overlap_method         = overlap_method,
+      min_reciprocal_overlap = min_reciprocal_overlap,
+      BPPARAM = BiocParallel::MulticoreParam(workers = n_cores)
     )
-    names(gr) <- as.character(seq_len(n))
-    
-    # Find all pairwise overlaps within this group
-    # type = "any" catches partial overlaps; we filter by RO threshold below
-    hits <- GenomicRanges::findOverlaps(gr, gr, type = "any", select = "all")
-    
-    # Remove self-hits
-    hits <- hits[S4Vectors::queryHits(hits) != S4Vectors::subjectHits(hits)]
-    
-    if (length(hits) == 0L) {
-      # No overlaps at all — every segment is its own equivalence class
-      new_ids <- seq(
-        from = global_equiv_counter + 1L,
-        by   = 1L,
-        length.out = n
-      )
-      df$cnv_equiv_id[grp$.row_idx] <- new_ids
-      global_equiv_counter <- global_equiv_counter + n
-      next
-    }
-    
-    q_idx <- S4Vectors::queryHits(hits)
-    s_idx <- S4Vectors::subjectHits(hits)
-    
-    # Replace the previous overlap_fn() call with:
-    scores <- compute_overlap(
-      q_start = grp$start[q_idx],
-      q_end   = grp$end[q_idx],
-      s_start = grp$start[s_idx],
-      s_end   = grp$end[s_idx],
-      method  = overlap_method
+  } else {
+    results <- lapply(
+      group_indices,
+      process_cnv_cluster,
+      overlap_method         = overlap_method,
+      min_reciprocal_overlap = min_reciprocal_overlap
     )
-    
-    # Keep only pairs that meet the reciprocal overlap threshold
-    passing <- scores >= min_reciprocal_overlap
-    q_pass  <- q_idx[passing]
-    s_pass  <- s_idx[passing]
-    
-    if (length(q_pass) == 0L) {
-      # Overlaps exist but none pass the threshold — all separate classes
-      new_ids <- seq(
-        from = global_equiv_counter + 1L,
-        by   = 1L,
-        length.out = n
-      )
-      df$cnv_equiv_id[grp$.row_idx] <- new_ids
-      global_equiv_counter <- global_equiv_counter + n
-      next
-    }
-    
-    # Connected components on the overlap graph
-    # Each node is a segment (1..n), edges connect segments that pass RO
-    # Components define equivalence classes — no sequential walk, no chaining
-    g <- igraph::graph_from_edgelist(
-      cbind(q_pass, s_pass),
-      directed = FALSE
-    )
-    
-    # Add isolated vertices (segments with no passing overlaps) so every
-    # segment gets a component assignment
-    g <- igraph::add_vertices(g, n - igraph::vcount(g))
-    
-    component_ids <- igraph::components(g)$membership
-    
-    # Offset component IDs by the global counter to ensure global uniqueness
-    df$cnv_equiv_id[grp$.row_idx] <- component_ids + global_equiv_counter
-    global_equiv_counter <- global_equiv_counter + max(component_ids)
   }
   
-  df
+  # ---- Step 2: assign composite equiv IDs ---------------------------------
+  # Composite key = cell_name|chr|cnv_state|local_clique_id
+  # Unique by construction — no global counter needed
+  # Human readable — carries its own context for debugging
+  n_duplicated_vec <- vapply(results, `[[`, integer(1), "n_duplicated")
+  total_duplicated <- sum(n_duplicated_vec)
+  
+  
+  result <- purrr::map(results, ~ {
+    .x$rows$cnv_equiv_id <- paste(
+      .x$rows$cell_name,
+      .x$rows$chr,
+      .x$rows$cnv_state,
+      .x$rows$local_clique_id,
+      sep = "|"
+    )
+    .x$rows$local_clique_id <- NULL
+    .x$rows
+  }) |>
+    dplyr::bind_rows() |>
+    dplyr::select(-.row_idx)
+  
+  removed_log <- purrr::map(results, ~ {
+    .x$removed}) %>%
+    dplyr::bind_rows()
+  
+  
+  
+  # ---- Sanity checks on output --------------------------------------------
+  
+  # Check 1: row count
+  # Expected: post-filter rows + duplicated rows from multi-clique segments
+  # Isolated segments are dropped so: result rows = retained + duplicated
+  
+  n_rows_result   <- nrow(result)
+  n_rows_expected <- n_rows_postfilter + total_duplicated
+  
+  # Count isolated segments — those that were filtered out during clique
+  # assignment (no passing overlap partner)
+  
+  n_removed <- n_rows_postfilter - (n_rows_result - total_duplicated)
+  
+  if (n_removed != nrow(removed_log)) {
+    stop(sprintf(
+      "Removed items: output has %d rows supposedly removed while removed log has %d. Check find_maximal_cliques.",
+      n_removed,
+      sum(removed_log$removal_reason == "isolated")
+    ))
+  }
+  
+  
+  message(sprintf(paste0(
+    "Row accounting:\n",
+    "  Post-filter input:                                   %d\n",
+    "  Isolated (dropped):                                  %d\n",
+    "  Single Sequence (dropped):                           %d\n",
+    "  Groups with Overlap bellow the threshold (dropped):  %d\n",
+    "  0 hits sequences                                     %d\n",
+    "  Total of segments (dropped):                         %d\n",
+    "  Duplicated (added):                                  %d\n",
+    "  Final output:                                        %d"
+  ),
+  n_rows_postfilter,
+  sum(removed_log$removal_reason == "isolated"),
+  sum(removed_log$removal_reason == "single_sequence"),
+  sum(removed_log$removal_reason == "inconsistent overall with the selected threshold"),
+  sum(removed_log$removal_reason == "0 hits"),
+  nrow(removed_log),
+  total_duplicated,
+  n_rows_result
+  ))
+  
+  if (n_removed < 0L) {
+    stop(sprintf(
+      "Row count inconsistency: output has %d more rows than expected. ",
+      "Check find_maximal_cliques for duplicate row generation errors.",
+      abs(n_removed)
+    ))
+  }
+  
+  # Check 2: no NA equiv IDs
+  n_na_equiv <- sum(is.na(result$cnv_equiv_id))
+  if (n_na_equiv > 0L) {
+    stop(sprintf(
+      "%d rows have NA cnv_equiv_id after assignment. ",
+      "Check process_cnv_cluster for unhandled cases.",
+      n_na_equiv
+    ))
+  }
+  
+  # Check 3: every cnv_equiv_id within a (cell, chr, state) group
+  # should correspond to at least one row — no phantom IDs
+  equiv_counts <- result |>
+    dplyr::group_by(cell_name, chr, cnv_state, cnv_equiv_id) |>
+    dplyr::summarise(n = dplyr::n(), .groups = "drop")
+  
+  if (any(equiv_counts$n == 0L)) {
+    warning("Some cnv_equiv_id values have zero rows — this should not happen.")
+  }
+  
+  # Check 4: cnv_equiv_id format sanity — all should follow cell|chr|state|id
+  malformed <- sum(!grepl("^.+\\|chr.+\\|.+\\|\\d+$", result$cnv_equiv_id))
+  if (malformed > 0L) {
+    warning(sprintf(
+      "%d cnv_equiv_id values do not match expected format cell|chr|state|id.",
+      malformed
+    ))
+  }
+  
+  message(sprintf(
+    "Equivalence complete: %d output rows, %d duplicated across cliques",
+    n_rows_result,
+    total_duplicated
+  ))
+  
+  list(results_id = result, removed_log = removed_log)
 }
-
-
 
 
 #' Summarize reference support for CNV equivalence groups
@@ -639,7 +900,9 @@ run_fast_cnv_pipeline <- function(
     max_gap = 100000,
     min_reciprocal_overlap = 0.5,
     min_references = 2,
-    overlap_method = "reciprocal"
+    overlap_method = "reciprocal",
+    parallel = F,
+    cores = 1L
 ) {
   
   message("→ Collapsing genes to segments")
@@ -652,10 +915,15 @@ run_fast_cnv_pipeline <- function(
   equiv <- assign_cnv_equivalence(
     df = merged,
     min_reciprocal_overlap = min_reciprocal_overlap,
-    overlap_method = "reciprocal"
+    overlap_method         = "reciprocal",
+    filter_seq_mb          = 7,
+    parallel               = FALSE,
+    n_cores = cores
   )
   
-  cnv_events <- summarize_cnv_support(equiv)
+  table_with_equiv_id <- equiv$results_id
+  
+  cnv_events <- summarize_cnv_support(table_with_equiv_id)
   
   message("→ Filtering CNVs by reference support")
   
@@ -666,9 +934,10 @@ run_fast_cnv_pipeline <- function(
   
   
   list(
-    cnvs_per_segment   = equiv,             # one row per segment, with equiv IDs - IDs which tells which CNVs overlap each other
-    cnvs_summarized    = cnv_events,        # one row per equiv group, with support counts
-    cnvs_supported     = supported_events  # filtered to min_references threshold
+    cnvs_per_segment   = table_with_equiv_id, # one row per segment, with equiv IDs - IDs which tells which CNVs overlap each other
+    cnvs_summarized    = cnv_events,          # one row per equiv group, with support counts
+    cnvs_supported     = supported_events,    # filtered to min_references threshold
+    removed_log        = equiv$removed_log    #segments that were removed for numerous reason
   )
 }
 
@@ -791,13 +1060,14 @@ classify_cnv_arms <- function(cnv_df, chromosome_arms) {
   cnv_df$arm_class <- vapply(
     seq_len(nrow(cnv_df)),
     function(i) {
-      chr_arms <- arms_by_chr[[cnv_df$chr[i]]]
+
+      chr_arms <- arms_by_chr[[as.character(cnv_df[i,]$chr)]]
       if (is.null(chr_arms)) return(NA_character_)
       classify_single_cnv(cnv_df[i, ], chr_arms)
     },
     character(1)
   )
-  
+
   na_rate <- mean(is.na(cnv_df$arm_class))
   if (na_rate > 0.1) {
     warning(sprintf(
@@ -919,450 +1189,7 @@ add_chromosome_info <- function(main_df,
 
 
 
-#' Plot the density distribution of CNV lengths
-#'
-#' Creates a density plot of CNV lengths in megabases, optionally restricted
-#' to a single CNV state such as gain or loss.
-#'
-#' @param dt A data frame containing at least the columns cnv_length_mb
-#'   and optionally cnv_state.
-#' @param state Optional character string specifying a CNV state to subset,
-#'   such as "gain" or "loss". If NULL, all rows are used.
-#' @param thresholds Numeric vector of CNV length thresholds to display as
-#'   vertical dashed lines.
-#' @param fill_color Fill color for the density polygon. Default is
-#' @param title Plot title. Default is "CNV length distribution".
-#'
-#' @return A ggplot2 object.
-plot_cnv_density <- function(
-    dt,
-    state = NULL,
-    thresholds = c(5, 25, 50),
-    fill_color = "grey40",
-    title = "CNV length distribution"
-) {
-  
-  # Subset efficiently (no copy)
-  if (!is.null(state)) {
-    dt_sub <- dt[dt$cnv_state == state,]
-  } else {
-    dt_sub <- dt
-  }
-  
-  ggplot(dt_sub, aes(x = cnv_length_mb)) +
-    geom_density(fill = fill_color, alpha = 0.4) +
-    geom_vline(
-      xintercept = thresholds,
-      linetype = "dashed",
-      alpha = 0.6
-    ) +
-    labs(
-      title = title,
-      x = "CNV length (Mb)",
-      y = "Density"
-    ) +
-    theme_minimal()
-}
 
-
-
-#' Plot overall and state-specific CNV length distributions
-#'
-#' Builds three density plots showing CNV length distributions for all CNVs,
-#' gain events, and loss events, then stacks them vertically.
-#'
-#' @param dt A data frame containing CNV length information, including
-#'   cnv_length_mb and cnv_state.
-#' @param thresholds Numeric vector of thresholds to display as dashed vertical
-#'   lines in each panel. Default is c(5, 25, 50).
-#'
-#' @return A combined patchwork plot object.
-plot_all_cnv_distributions <- function(
-    dt,
-    thresholds = c(5, 25, 50)
-) {
-  
-  p_overall <- plot_cnv_density(
-    dt = dt,
-    state = NULL,
-    thresholds = thresholds,
-    fill_color = "grey40",
-    title = "Overall CNV length distribution"
-  )
-  
-  p_gain <- plot_cnv_density(
-    dt = dt,
-    state = "gain",
-    thresholds = thresholds,
-    fill_color = "steelblue",
-    title = "Gain CNV length distribution"
-  )
-  
-  p_loss <- plot_cnv_density(
-    dt = dt,
-    state = "loss",
-    thresholds = thresholds,
-    fill_color = "firebrick",
-    title = "Loss CNV length distribution"
-  )
-  
-  p_overall / p_gain / p_loss
-}
-
-
-
-
-#' Plot density distributions by level and type
-#'
-#' Creates a density plot for percentage values within a selected level,
-#' grouped by type.
-#'
-#' @param level_name Character string specifying which level in
-#'   plot_long$level to plot.
-#' @param plot_long A long-format data frame containing at least the columns
-#'   level, type, and percentage.
-#' @param threshold Numeric threshold shown as a dashed vertical line.
-#'
-#' @return A ggplot2 object.
-#'
-#' @details
-#' The function also computes the mean percentage per type, although the
-#' current vertical reference line uses the supplied threshold value.
-make_density_plot <- function(level_name,plot_long, threshold) {
-  
-  df_sub <- filter(plot_long, level == level_name)
-  
-  # compute means per type
-  mean_df <- df_sub %>%
-    group_by(type) %>%
-    summarise(mean_value = mean(percentage, na.rm = TRUE),
-              .groups = "drop")
-  
-  ggplot(df_sub,
-         aes(x = percentage, fill = type, color = type)) +
-    geom_density(alpha = 0.3, linewidth = 1) +
-    
-    # vertical mean lines (like abline)
-    geom_vline(data = mean_df,
-               aes(xintercept = threshold),
-               linetype = "dashed",
-               linewidth = 1.2,
-               show.legend = FALSE) +
-    
-    labs(
-      title = level_name,
-      x = "Percentage",
-      y = "Density"
-    ) +
-    theme_classic(base_size = 14) +
-    theme(legend.position = "top")
-}
-
-
-
-
-
-################################################################
-## Functions to Process Information for conjoined heatmap#######
-#################################################################
-#' Prepare genome-wide chromosome and arm coordinates
-#'
-#' Builds chromosome-level cumulative coordinates and lookup tables for
-#' chromosome arms, enabling mapping of chromosome-local intervals into a
-#' genome-wide coordinate system.
-#'
-#' @param chromosome_arms A data frame containing chromosome arm annotation.
-#'   It should include at least \code{chr}, \code{arm}, \code{arm_start},
-#'   \code{arm_end}, and \code{arm_length}.
-#'
-#' @return A named list containing information the different fraction from the chromossome
-#'
-prepare_genome_structure <- function(chromosome_arms) {
-  
-  chromosome_lengths <- chromosome_arms %>%
-    group_by(chr) %>%
-    summarise(chr_length = sum(arm_length), .groups = "drop") %>%
-    mutate(
-      chr_num = suppressWarnings(as.numeric(gsub("chr", "", chr)))
-    ) %>%
-    arrange(chr_num, chr) %>%
-    select(-chr_num) %>%
-    mutate(
-      chr_start = lag(cumsum(chr_length), default = 0),
-      chr_end   = chr_start + chr_length
-    )
-  
-  # Precompute arm lookup tables (vectorized, no match needed later)
-  arm_lookup <- chromosome_arms %>%
-    left_join(chromosome_lengths, by = "chr") %>%
-    mutate(
-      genome_arm_start = chr_start + arm_start,
-      genome_arm_end   = chr_start + arm_end
-    )
-  
-  p_lookup <- arm_lookup %>%
-    filter(arm == "p") %>%
-    select(chr,
-           p_genome_start = genome_arm_start,
-           p_genome_end   = genome_arm_end)
-  
-  q_lookup <- arm_lookup %>%
-    filter(arm == "q") %>%
-    select(chr,
-           q_genome_start = genome_arm_start,
-           q_genome_end   = genome_arm_end)
-  
-  list(
-    chromosome_lengths = chromosome_lengths,
-    p_lookup = p_lookup,
-    q_lookup = q_lookup,
-    arm_lookup = arm_lookup
-  )
-}
-
-#' Map CNV intervals to genome-wide coordinates
-#'
-#' Converts chromosome-level CNV coordinates into cumulative genome-wide
-#' coordinates for visualization. The function joins chromosome and chromosome-arm
-#' lookup tables, computes genome-wide start and end positions, optionally
-#' expands large events to full chromosome or arm boundaries for plotting,
-#' and encodes CNV state numerically.
-#'
-#' @param cnv_filtered A data frame of CNV events
-#' @param genome_structure
-#' @param threshold Optional numeric threshold used to expand plotted CNV
-#'   intervals to whole-chromosome or chromosome-arm boundaries.
-#' @return A data frame with additional columns
-map_cnv_to_genome <- function(cnv_filtered,
-                              genome_structure,
-                              threshold = NULL) {
-  
-  chromosome_lengths <- genome_structure$chromosome_lengths
-  p_lookup <- genome_structure$p_lookup
-  q_lookup <- genome_structure$q_lookup
-  
-  
-  cnv_mapped <- cnv_filtered %>%
-    left_join(chromosome_lengths, by = "chr") %>%
-    left_join(p_lookup, by = "chr") %>%
-    left_join(q_lookup, by = "chr") %>%
-    mutate(
-      genome_start = chr_start + start,
-      genome_end   = chr_start + end
-    )
-  
-  # If threshold is NULL → no override logic
-  if (is.null(threshold)) {
-    
-    cnv_mapped <- cnv_mapped %>%
-      mutate(
-        genome_start_plot = genome_start,
-        genome_end_plot   = genome_end
-      )
-    
-  } else {
-    
-    cnv_mapped <- cnv_mapped %>%
-      mutate(
-        genome_start_plot = case_when(
-          whole_chromosome_gain > threshold |
-            whole_chromosome_loss > threshold ~ chr_start,
-          
-          p_arm_gain > threshold |
-            p_arm_loss > threshold ~ p_genome_start,
-          
-          q_arm_gain > threshold |
-            q_arm_loss > threshold ~ q_genome_start,
-          
-          TRUE ~ genome_start
-        ),
-        genome_end_plot = case_when(
-          whole_chromosome_gain > threshold |
-            whole_chromosome_loss > threshold ~ chr_end,
-          
-          p_arm_gain > threshold |
-            p_arm_loss > threshold ~ p_genome_end,
-          
-          q_arm_gain > threshold |
-            q_arm_loss > threshold ~ q_genome_end,
-          
-          TRUE ~ genome_end
-        )
-      )
-  }
-  
-  cell_order <- cnv_filtered %>%
-    distinct(cell_name, embryo, stage) %>%
-    arrange(embryo, stage)
-  
-  cnv_mapped <- cnv_mapped %>%
-    mutate(
-      cell_name = factor(cell_name, levels = cell_order$cell_name),
-      cell_id = as.numeric(cell_name),
-      cnv_state_numeric = case_when(
-        cnv_state == "gain" ~ 1,
-        cnv_state == "loss" ~ -1,
-        TRUE ~ 0
-      )
-    ) %>%
-    arrange(embryo, cell_id)
-}
-
-#' Plot a chromosome ideogram
-#'
-#' Creates a simple ideogram-style plot of chromosome arms aligned to genome-wide
-#' coordinates.
-#'
-#' @param genome_structure Output from prepare_genome_structure().
-#' @param max_cell_id Maximum cell index used to place the ideogram above the
-#'   heatmap.
-#' @param arm_colors Named vector of colors for chromosome arms.
-#'
-#' @return A ggplot2 object.
-plot_ideogram <- function(genome_structure,
-                          max_cell_id,
-                          arm_colors = c("p"="#4DBBD5",
-                                         "cen"="black",
-                                         "q"="#E64B35")) {
-  
-  chromosome_lengths <- genome_structure$chromosome_lengths
-  arm_lookup <- genome_structure$arm_lookup
-  
-  arm_plot <- arm_lookup %>%
-    mutate(
-      ymin = max_cell_id + 1,
-      ymax = ymin + 1
-    )
-  
-  ggplot(arm_plot) +
-    geom_rect(aes(
-      xmin = genome_arm_start,
-      xmax = genome_arm_end,
-      ymin = ymin,
-      ymax = ymax,
-      fill = arm
-    ), color = NA) +
-    scale_fill_manual(values = arm_colors, name = "Arm") +
-    theme_void() +
-    scale_x_continuous(
-      breaks = chromosome_lengths$chr_start,
-      labels = chromosome_lengths$chr,
-      expand = c(0,0),
-      limits = c(0, max(chromosome_lengths$chr_end) +1e6)
-    )
-}
-
-
-
-#' Plot a CNV heatmap across the genome
-#'
-#' Draws a heatmap-like representation of CNV intervals across genome-wide
-#' coordinates and cells.
-#'
-#' @param cnv_mapped A mapped CNV data frame produced by
-#'   map_cnv_to_genome().
-#' @param chromosome_lengths Chromosome coordinate table from
-#'   prepare_genome_structure().
-#' @param boundary_lines Optional numeric vector of horizontal boundary positions.
-#' @param show_x_labels Logical; whether chromosome labels should be displayed on
-#'   the x-axis.
-#'
-#' @return A ggplot2 object.
-plot_cnv_heatmap <- function(cnv_mapped,
-                             chromosome_lengths,
-                             boundary_lines = NULL,
-                             show_x_labels = FALSE) {
-  
-  max_plot_idx <- max(cnv_mapped$plot_idx)
-  
-  p <- ggplot(cnv_mapped) +
-    geom_rect(aes(
-      xmin = genome_start_plot,
-      xmax = genome_end_plot,
-      ymin = plot_idx - 0.5,
-      ymax = plot_idx + 0.5,
-      fill = cnv_state_numeric
-    )) +
-    geom_segment(
-      data = chromosome_lengths,
-      aes(x = chr_end,
-          xend = chr_end,
-          y = 0,
-          yend = max_plot_idx),
-      color = "black",
-      linewidth = 0.3
-    ) +
-    scale_fill_gradient2(
-      low = "blue",
-      mid = "white",
-      high = "red",
-      midpoint = 0
-    ) +
-    scale_x_continuous(
-      breaks = chromosome_lengths$chr_start,
-      labels = chromosome_lengths$chr,
-      expand = c(0,0),
-      limits = c(0, max(chromosome_lengths$chr_end))
-    ) +
-    theme_minimal() +
-    theme(
-      panel.background = element_rect(fill = "white", color = NA),
-      axis.text.y = element_blank(),
-      axis.ticks.y = element_blank(),
-      panel.grid = element_blank(),
-      axis.text.x = if (show_x_labels)
-        element_text(size = 10, angle = 45, hjust = 1)
-      else element_blank()
-    ) +
-    labs(x = "Chromosome", y = "Cells", fill = "CNV State")
- 
-  if (!is.null(boundary_lines) & length(boundary_lines)  < length(cnv_mapped$plot_idx)/2 +50) { #Change this later
-    p <- p + geom_hline(
-      yintercept = boundary_lines,
-      color = "black",
-      linewidth = 0.1,
-      alpha = 0.7
-    )
-  }
-  
-  p
-}
-
-
-
-#' Combine a CNV heatmap with an ideogram
-#'
-#' Adds an ideogram plot above a CNV heatmap using a grob annotation.
-#'
-#' @param heatmap_plot A heatmap plot created by plot_cnv_heatmap().
-#' @param ideogram_plot An ideogram plot created by plot_ideogram().
-#' @param cnv_mapped A mapped CNV data frame used to determine y-axis placement.
-#' @param remove_legends Logical; whether to remove legends from both plots.
-#'
-#' @return A combined ggplot2 object.
-assemble_heatmap_with_ideogram <- function(heatmap_plot,
-                                           ideogram_plot,
-                                           cnv_mapped,
-                                           remove_legends = T) {
-  
-  if (remove_legends) {
-    heatmap_plot  <- heatmap_plot  + theme(legend.position = "none")
-    ideogram_plot <- ideogram_plot + theme(legend.position = "none")
-  }
-  
-  # Convert ideogram to grob
-  ideogram_grob <- ggplotGrob(ideogram_plot)
-  
-  # Add ideogram as annotation to heatmap
-  p_combined <- heatmap_plot +
-    annotation_custom(
-      grob = ideogram_grob,
-      xmin = -Inf, xmax = Inf,
-      ymin = max(cnv_mapped$plot_idx) + 1,  
-      ymax = max(cnv_mapped$plot_idx) + 3
-    )
-  return(p_combined)
-}
 
 
 

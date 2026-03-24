@@ -110,6 +110,7 @@ refine_complete_subclusters <- function(x, min_reciprocal_overlap = 0.75) {
   q <- q[recip_ok]
   s <- s[recip_ok]
   
+  
   # adjacency matrix for strict pairwise overlap
   adj <- matrix(FALSE, nrow = nrow(x), ncol = nrow(x))
   diag(adj) <- TRUE
@@ -119,7 +120,6 @@ refine_complete_subclusters <- function(x, min_reciprocal_overlap = 0.75) {
     adj[cbind(s, q)] <- TRUE
   }
   
-  # greedy complete partition
   ord <- order(x$start, x$end)
   subcluster <- integer(nrow(x))
   groups <- list()
@@ -135,7 +135,6 @@ refine_complete_subclusters <- function(x, min_reciprocal_overlap = 0.75) {
           groups[[g]] <- c(members, i)
           subcluster[i] <- g
           assigned <- TRUE
-          break
         }
       }
     }

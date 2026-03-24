@@ -36,7 +36,9 @@ infer_objs <- load_and_prepare_infercnv_reference(infer_objs_1)
 
 
 final_data <- run_fast_cnv_pipeline(infer_objs,max_gap = 80000,
-                                    min_reciprocal_overlap = 0.75)
+                                    min_reciprocal_overlap = 0.75,
+                                    min_references = 2,
+                                    overlap_method = "reciprocal")
 
 
 ############################################################################### -
@@ -47,10 +49,10 @@ supported_events <- final_data[["cnvs_supported"]]
 
 
 # Extract embryo (everything except the last dot and cell number)
-supported_events$embryo <- sub("^(.+)\\.[0-9]+$", "\\1", df$cell_name)
+supported_events$embryo <- sub("^(.+)\\.[0-9]+$", "\\1", supported_events$cell_name)
 
 # Extract stage (first part before the first dot)
-supported_events$stage <- sub("^([^\\.]+)\\..*$", "\\1", df$cell_name)
+supported_events$stage <- sub("^([^\\.]+)\\..*$", "\\1", supported_events$cell_name)
 
 
 ## OVerall CNVs Length
@@ -130,7 +132,7 @@ final_plot <- p1 | p2 | p3
 #########################################################################-
 
 #Save RDS object
-res <- readRDS("Petropolous_Karyotyping.rds")
+res <- readRDS("C:/Users/pmgra/Documents/VUB/InferCNV/inferCNV_RScripts/Petropolous_Karyotyping.rds")
 
 chromosome_arms <- res[["chromosome_arms"]]
 seurat_obj <- res[["seura_obj"]]

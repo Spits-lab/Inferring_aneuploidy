@@ -496,8 +496,8 @@ compute_overlap <- function(q_start, q_end, s_start, s_end, method = "reciprocal
 
 
 
-find_maximal_cliches <- function(q_pass, s_pass, n, grp){
-  
+find_maximal_cliches <- function(q_pass, s_pass, grp){
+  n   <- nrow(grp)
   # ---- Maximal clique assignment ------------------------------------------
   # Maximal cliques guarantee every pair within a group directly passes
   # the overlap threshold — no transitive chaining
@@ -623,7 +623,7 @@ process_cnv_cluster <- function(grp,overlap_method,min_reciprocal_overlap){
     return(list(rows = grp[0,], n_duplicated = 0L, removed = removed_log))
   }
   
-  res <- find_maximal_cliches(q_pass, s_pass, n, grp)
+  res <- find_maximal_cliches(q_pass, s_pass,grp)
   
   return(res)
   

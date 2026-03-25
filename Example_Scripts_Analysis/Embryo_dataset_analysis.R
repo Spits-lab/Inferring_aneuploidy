@@ -35,17 +35,102 @@ infer_objs_1 <- lapply(infer_objs, function(x){
 infer_objs <- load_and_prepare_infercnv_reference(infer_objs_1)
 
 
-final_data <- run_fast_cnv_pipeline(infer_objs,max_gap = 80000,
-                                    min_reciprocal_overlap = 0.75,
+final_data <- run_fast_cnv_pipeline(infer_objs,max_gap = 100000,
+                                    min_ovelap_consistent_calls = 0.75,
+                                    min_overlap_multiple_nodes = 0.6,
                                     min_references = 2,
-                                    overlap_method = "reciprocal")
+                                    removed_log_retur = T)
 
 
 ############################################################################### -
 ############################### Distribution of Gain and Loss #################
 ############################################################################### -
 
-supported_events <- final_data[["cnvs_supported"]]
+supported_events <- final_data[["cnvs_supported_overlaped"]]
+
+group_split_per_cell <- supported_events |>
+  dplyr::group_by(dplyr::across(dplyr::all_of(c("cell_name", "chr", "cnv_state")))) |>
+  dplyr::filter(dplyr::n() > 1L) |>
+  dplyr::group_split()
+
+
+## Assessment of potential gaps within the genome
+pairwise_length_diff <- purrr::map(group_split_per_cell, ~ {
+  grp <- .x
+  # Generate all pairwise combinations of row indices
+  pairs <- utils::combn(seq_len(nrow(grp)), 2, simplify = FALSE)
+  
+  purrr::map_dfr(pairs, function(idx) {
+    a <- grp[idx[1], ]
+    b <- grp[idx[2], ]
+    
+      data.frame(abs_diff_mb = abs(a$cnv_length_mb - b$cnv_length_mb))
+    
+  })
+}) |>
+  dplyr::bind_rows()
+
+
+pairwise_length_diff %>%
+  ggplot( aes(x= abs_diff_mb)) +
+  geom_density(fill="#69b3a2", color="#e9ecef", alpha=0.8) + 
+  geom_vline(xintercept = c(1,5,10), color = "red") +
+  ylim(0, 0.05)
+
+
+overlap_diff <- purrr::map(group_split_per_cell, ~ {
+  grp <- .x
+  
+  gr <- GenomicRanges::GRanges(
+    seqnames = grp$chr,
+    ranges   = IRanges::IRanges(start = grp$start, end = grp$end),
+    strand   = "*"
+  )
+  
+  hits <- GenomicRanges::findOverlaps(gr, gr, type = "any", select = "all")
+  hits <- hits[S4Vectors::queryHits(hits) != S4Vectors::subjectHits(hits)]
+  
+  # No geometric overlaps in this group — return NULL, filtered out below
+  if (length(hits) == 0L) return(NULL)
+  
+  q_idx <- S4Vectors::queryHits(hits)
+  s_idx <- S4Vectors::subjectHits(hits)
+  
+  uniq_comb <- data.frame(q_idx = q_idx, s_idx = s_idx) %>%
+    distinct()
+  scores <- compute_overlap(
+    q_start = grp$start[uniq_comb$q_idx],
+    q_end   = grp$end[uniq_comb$q_idx],
+    s_start = grp$start[uniq_comb$s_idx],
+    s_end   = grp$end[uniq_comb$s_idx],
+    method  = "reciprocal"
+  )
+  
+  # Build one row per overlapping pair
+  data.frame(
+    cell_name      = grp$cell_name[uniq_comb$q_idx],
+    chr            = grp$chr[uniq_comb$q_idx],
+    cnv_state      = grp$cnv_state[uniq_comb$q_idx],
+    cnv_equiv_id_a = grp$merge_group_id[uniq_comb$q_idx],
+    cnv_equiv_id_b = grp$merge_group_id[uniq_comb$s_idx],
+    start_a        = grp$start[uniq_comb$q_idx],
+    end_a          = grp$end[uniq_comb$q_idx],
+    start_b        = grp$start[uniq_comb$s_idx],
+    end_b          = grp$end[uniq_comb$s_idx],
+    overlap_score  = scores
+  )
+}) |>
+  # Remove NULL entries (groups with no geometric overlap)
+  purrr::compact() |>
+  dplyr::bind_rows()
+
+
+overlap_diff %>%
+  ggplot( aes(x= overlap_score)) +
+  geom_density(fill="#69b3a2", color="#e9ecef", alpha=0.8) 
+
+
+
 
 
 # Extract embryo (everything except the last dot and cell number)

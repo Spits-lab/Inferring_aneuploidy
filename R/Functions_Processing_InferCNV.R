@@ -557,7 +557,7 @@ find_maximal_cliches <- function(q_pass, s_pass, grp){
   }
   
   isolated_rows <- grp[isolated_idx, ]
-  isolated_rows$removal_reason <- "isolated"
+  isolated_rows$removal_reason <- "non_overlap (isolated)"
   
   if (!is.null(unresolved_row)){
     removed_log <- bind_rows(unresolved_row,isolated_rows)
@@ -571,7 +571,7 @@ find_maximal_cliches <- function(q_pass, s_pass, grp){
 }
 
 
-process_cnv_cluster <- function(grp,overlap_method,min_reciprocal_overlap){
+process_cnv_cluster <- function(grp,overlap_method,min_ovelap){
   n   <- nrow(grp)
   
   # Single-segment group — trivially its own equivalence class
@@ -610,7 +610,7 @@ process_cnv_cluster <- function(grp,overlap_method,min_reciprocal_overlap){
     method  = overlap_method
   )
   
-  passing <- scores >= min_reciprocal_overlap
+  passing <- scores >= min_ovelap
   q_pass  <- q_idx[passing]
   s_pass  <- s_idx[passing]
   
@@ -618,7 +618,7 @@ process_cnv_cluster <- function(grp,overlap_method,min_reciprocal_overlap){
   if (length(q_pass) == 0L) {
     # Overlaps exist but none pass threshold — all separate classes
     removed_log <- grp
-    removed_log$removal_reason <- "inconsistent overall with the selected threshold"
+    removed_log$removal_reason <- "non overall (threshold based)"
     grp$local_clique_id <- seq_len(n)
     return(list(rows = grp[0,], n_duplicated = 0L, removed = removed_log))
   }
@@ -634,7 +634,7 @@ process_cnv_cluster <- function(grp,overlap_method,min_reciprocal_overlap){
 
 assign_cnv_equivalence <- function(
     df,
-    min_reciprocal_overlap = 0.5,
+    min_ovelap = 0.5,
     overlap_method         = "reciprocal",
     filter_seq_mb          = 7,
     parallel               = FALSE,
@@ -703,7 +703,7 @@ assign_cnv_equivalence <- function(
       group_indices,
       process_cnv_cluster,
       overlap_method         = overlap_method,
-      min_reciprocal_overlap = min_reciprocal_overlap,
+      min_ovelap = min_ovelap,
       BPPARAM = BiocParallel::MulticoreParam(workers = n_cores)
     )
   } else {
@@ -711,7 +711,7 @@ assign_cnv_equivalence <- function(
       group_indices,
       process_cnv_cluster,
       overlap_method         = overlap_method,
-      min_reciprocal_overlap = min_reciprocal_overlap
+      min_ovelap = min_ovelap
     )
   }
   
@@ -884,6 +884,309 @@ filter_cnv_events <- function(cnv_events, min_references = 2) {
 }
 
 
+identify_duplicated_segments <- function(
+    all_segments,
+    consistent,
+    coord_cols = c("cell_name", "chr", "cnv_state", "start", "end",
+                   "cnv_length", "cnv_length_mb", "reference")
+) {
+  
+  # ---- Validation ---------------------------------------------------------
+  missing_seg  <- setdiff(coord_cols, colnames(all_segments))
+  missing_cons <- setdiff(c(coord_cols, "cnv_equiv_id"), c(colnames(consistent), "reference"))
+  
+  if (length(missing_seg) > 0L) {
+    stop("all_segments missing columns: ", paste(missing_seg, collapse = ", "))
+  }
+  if (length(missing_cons) > 0L) {
+    stop("consistent missing columns: ", paste(missing_cons, collapse = ", "))
+  }
+  
+  # ---- Find duplicated segments -------------------------------------------
+  # Segments appearing under more than one cnv_equiv_id for same coordinates
+  # Filtered to only those present in supported events
+  duplicated_segments <- all_segments |>
+    dplyr::group_by(dplyr::across(dplyr::all_of(coord_cols))) |>
+    dplyr::filter(dplyr::n() > 1L) |>
+    dplyr::ungroup() |>
+    dplyr::filter(cnv_equiv_id %in% consistent$cnv_equiv_id) #to ensure 
+  
+  not_duplicated <- consistent |>
+    dplyr::filter(!(cnv_equiv_id %in% duplicated_segments$cnv_equiv_id)) |>
+    dplyr::mutate(merge_group_id = cnv_equiv_id)
+  
+  # ---- Split for processing -----------------------------------------------
+  duplicate_list <- duplicated_segments |>
+    dplyr::group_by(dplyr::across(dplyr::all_of(coord_cols))) |>
+    dplyr::group_split()
+  
+  # ---- Sanity checks ------------------------------------------------------
+  if (!all(purrr::map_lgl(duplicate_list, ~ nrow(.x) >= 2L))) {
+    stop("Some duplicate groups have fewer than 2 members — check coord_cols definition.")
+  }
+  
+  message(sprintf(paste0(
+    "Duplicated segment summary:                                 \n",
+    "  Duplicate segments (add into multiple calls):  %d\n",
+    "  Duplicate groups to resolve:                   %d"
+  ),
+  length(unique(duplicated_segments$cnv_equiv_id)),
+  length(duplicate_list)
+  ))
+  
+  list(
+    duplicated      = duplicated_segments,
+    not_duplicated  = not_duplicated,
+    duplicate_list  = duplicate_list
+  )
+}
+
+
+
+
+
+
+resolve_duplicate_overlaps <- function(
+    df,
+    consistent,
+    min_overlap    = 0.6,
+    overlap_method = "reciprocal",
+    clique_mode    = c("connected", "complete")
+) {
+  
+  clique_mode <- match.arg(clique_mode)
+  
+  grp <- consistent[consistent$cnv_equiv_id %in% df$cnv_equiv_id, ]
+  
+  if (nrow(grp) == 0L) {
+    warning("No matching events found in consistent for this duplicate group.")
+    return(grp)
+  }
+  
+  n <- nrow(grp)
+  
+  gr <- GenomicRanges::GRanges(
+    seqnames = grp$chr,
+    ranges   = IRanges::IRanges(start = grp$start, end = grp$end),
+    strand   = "*"
+  )
+  
+  hits <- GenomicRanges::findOverlaps(gr, gr, type = "any", select = "all")
+  hits <- hits[S4Vectors::queryHits(hits) != S4Vectors::subjectHits(hits)]
+  
+  # No overlaps at all — every event keeps its own ID
+  if (length(hits) == 0L) {
+    grp$merge_group_id <- grp$cnv_equiv_id
+    return(grp)
+  }
+  
+  q_idx <- S4Vectors::queryHits(hits)
+  s_idx <- S4Vectors::subjectHits(hits)
+  
+  scores <- compute_overlap(
+    q_start = grp$start[q_idx],
+    q_end   = grp$end[q_idx],
+    s_start = grp$start[s_idx],
+    s_end   = grp$end[s_idx],
+    method  = overlap_method
+  )
+  
+  passing <- scores >= min_overlap
+  q_pass  <- q_idx[passing]
+  s_pass  <- s_idx[passing]
+  
+  # Preassign  every row starts with its own ID
+  grp$merge_group_id <- grp$cnv_equiv_id
+  
+  # ---- Graph construction -------------------------------------------------
+  g <- igraph::graph_from_edgelist(
+    cbind(as.character(q_pass), as.character(s_pass)),
+    directed = FALSE
+  )
+  
+  # Add isolated vertices explicitly
+  n_connected <- length(unique(c(q_pass, s_pass)))
+  g <- igraph::add_vertices(g, n_connected - igraph::vcount(g))
+  
+  # ---- Component assignment -----------------------------------------------
+  if (clique_mode == "connected") {
+    comps       <- igraph::components(g)$membership
+    node_groups <- split(
+      as.integer(names(comps)),
+      as.integer(comps)
+    )
+    
+  } else {
+    cliques     <- igraph::max_cliques(g)
+    node_groups <- lapply(cliques, function(cl) as.integer(names(cl)))
+  }
+  
+  # Initialise collector before the loop
+  ambiguous_nodes <- list()
+  # ---- Build merge_group_id -----------------------------------------------
+  # ---- Assign merge_group_id — same logic for both modes ------------------
+  for (node_idx in node_groups) {
+    if (length(node_idx) > 1L) {
+      clique_nums <- stringr::str_extract(
+        grp$cnv_equiv_id[node_idx], "[^|]+$"
+      )
+      prefix    <- stringr::str_remove(
+        grp$cnv_equiv_id[node_idx[1]], "\\|[^|]+$"
+      )
+      merged_id <- paste0(
+        prefix, "|",
+        paste(sort(unique(clique_nums)), collapse = "_")
+      )
+      # First clique wins for ambiguous segments in complete mode
+      already_assigned <- node_idx[
+        grp$merge_group_id[node_idx] != grp$cnv_equiv_id[node_idx]
+      ]
+      
+      if (length(already_assigned) > 0L) {
+        ambiguous_nodes <- c(ambiguous_nodes, list(data.frame(
+          node_idx     = already_assigned,
+          cnv_equiv_id = grp$cnv_equiv_id[already_assigned],
+          kept_id      = grp$merge_group_id[already_assigned],
+          skipped_id   = merged_id
+        )))
+      }
+      
+      unassigned <- node_idx[
+        grp$merge_group_id[node_idx] == grp$cnv_equiv_id[node_idx]
+      ]
+      
+      grp$merge_group_id[unassigned] <- merged_id
+    }
+  }
+  
+  # Report once after loop — only if ambiguous nodes were found
+  if (length(ambiguous_nodes) > 0L) {
+    ambiguous_df <- dplyr::bind_rows(ambiguous_nodes)
+    message(sprintf(
+      "%d segments appeared in multiple overlap and they were assigned to the first overlap cluster.",
+      nrow(ambiguous_df)
+    ))
+  }
+  grp
+}
+
+
+resolve_shared_cliques <- function(
+    all_segments,
+    consistent,
+    coord_cols     = c("cell_name", "chr", "cnv_state", "start", "end",
+                       "cnv_length", "cnv_length_mb", "reference"),
+    min_overlap    = 0.6,
+    overlap_method = "reciprocal",
+    clique_mode    = c("connected", "complete"),
+    parallel       = FALSE,
+    n_cores        = 1L
+) {
+  
+  clique_mode <- match.arg(clique_mode)
+  
+  # ---- Step 1: identify duplicates ----------------------------------------
+  identified <- identify_duplicated_segments(
+    all_segments = all_segments,
+    consistent   = consistent,
+    coord_cols   = coord_cols
+  )
+  
+  not_duplicated <- identified$not_duplicated
+  duplicate_list <- identified$duplicate_list
+  
+  if (length(duplicate_list) == 0L) {
+    message("No duplicated segments found — returning consistent table unchanged.")
+    consistent$merge_group_id <- consistent$cnv_equiv_id
+    return(consistent)
+  }
+  
+  # ---- Step 2: resolve overlaps -------------------------------------------
+  if (parallel) {
+    resolved_list <- furrr::future_map(
+      duplicate_list,
+      resolve_duplicate_overlaps,
+      consistent     = consistent,
+      min_overlap    = min_overlap,
+      overlap_method = overlap_method,
+      clique_mode    = clique_mode,
+      .options       = furrr::furrr_options(seed = TRUE)
+    )
+  } else {
+    resolved_list <- purrr::map(
+      duplicate_list,
+      resolve_duplicate_overlaps,
+      consistent     = consistent,
+      min_overlap    = min_overlap,
+      overlap_method = overlap_method,
+      clique_mode    = clique_mode
+    )
+  }
+  
+  
+  # ---- Step 3: summarise merged groups ------------------------------------
+  new_merge_id_duplicates <- dplyr::bind_rows(resolved_list) |>
+    dplyr::group_by(merge_group_id, chr, cnv_state) |>
+    dplyr::summarise(
+      cell_name    = dplyr::first(cell_name),
+      start        = min(start),
+      end          = max(end),
+      references   = paste(
+        sort(unique(unlist(strsplit(references, ",")))),
+        collapse = ","
+      ),
+      n_references = length(unique(unlist(strsplit(references, ",")))),
+      # Recompute length from updated coordinates
+      cnv_length    = end - start + 1L,
+      cnv_length_mb = (end - start + 1L) / 1e6,
+      .groups       = "drop"
+    )
+  
+  # ---- Step 4: combine with non-duplicated --------------------------------
+  combined <- dplyr::bind_rows(not_duplicated, new_merge_id_duplicates) |>
+    dplyr::select(-cnv_equiv_id)
+  
+  # ---- Sanity checks ------------------------------------------------------
+  n_merged    <- nrow(new_merge_id_duplicates)
+  n_not_dup   <- nrow(not_duplicated)
+  n_combined  <- nrow(combined)
+  n_original  <- nrow(consistent)
+  
+  # Count how many groups were actually merged vs kept separate
+  n_truly_merged <- sum(stringr::str_detect(
+    new_merge_id_duplicates$merge_group_id, "_"
+  ))
+  n_kept_separate <- n_merged - n_truly_merged
+  
+  message(sprintf(paste0(
+    "Resolution summary:\n",
+    "  Original supported events:                      %d\n",
+    "  Non-duplicated (unchanged):                     %d\n",
+    "  Duplicate groups resolved:                      %d\n",
+    "    → merged into one event (within each group):  %d\n",
+    "    → kept separate:                              %d\n",
+    "  Final combined events:                          %d"
+  ),
+  n_original,
+  n_not_dup,
+  length(duplicate_list),
+  n_truly_merged,
+  n_kept_separate,
+  n_combined
+  ))
+  
+  if (n_combined > n_original) {
+    warning(sprintf(
+      "Combined table (%d rows) exceeds original (%d rows). ",
+      "Check for unintended row duplication in resolve_duplicate_overlaps.",
+      n_combined, n_original
+    ))
+  }
+  
+  combined
+}
+
+
 #' Run a fast CNV event consolidation pipeline
 #'
 #' Runs a CNV processing workflow from gene-level calls to merged CNV events
@@ -891,33 +1194,39 @@ filter_cnv_events <- function(cnv_events, min_references = 2) {
 #'
 #' @param gene_level_df A gene-level CNV data frame.
 #' @param max_gap Maximum genomic gap allowed when merging nearby segments.
-#' @param min_reciprocal_overlap Minimum reciprocal overlap for equivalence
+#' @param min_ovelap Minimum reciprocal overlap for equivalence
 #'   assignment.
 #' @param min_references Minimum number of references required to keep a CNV.
 #' @param overlap_method Select the overlap method
 run_fast_cnv_pipeline <- function(
     gene_level_df,
     max_gap = 100000,
-    min_reciprocal_overlap = 0.5,
+    min_ovelap_consistent_calls = 0.5,
+    min_overlap_multiple_nodes = 0.6,
+    filter_seq_meb_merge = 5,
+    filter_seq_meb_equiv = 7,
     min_references = 2,
-    overlap_method = "reciprocal",
+    overlap_method_equiv_cnv_call_merge = "reciprocal",
+    overlap_method_equiv_cnv_after_filter = "reciprocal",
     parallel = F,
-    cores = 1L
+    cores = 1L,
+    clique_mode_consistent = "connected",
+    removed_log_retur = F
 ) {
   
   message("→ Collapsing genes to segments")
   segments <- collapse_genes_to_cnv_segments(gene_cnv_df = gene_level_df)
  
   message("→ Merging nearby CNVs")
-  merged <- merge_nearby_regions(df = segments, max_gap = max_gap)
+  merged <- merge_nearby_regions(df = segments, max_gap = max_gap, filter_seq_mb = filter_seq_meb_merge)
  
   message("→ Assigning CNV equivalence")
   equiv <- assign_cnv_equivalence(
     df = merged,
-    min_reciprocal_overlap = min_reciprocal_overlap,
-    overlap_method         = "reciprocal",
-    filter_seq_mb          = 7,
-    parallel               = FALSE,
+    min_ovelap = min_ovelap_consistent_calls,
+    overlap_method         = overlap_method_equiv_cnv_call_merge,
+    filter_seq_mb          = filter_seq_meb_equiv,
+    parallel               = parallel,
     n_cores = cores
   )
   
@@ -931,14 +1240,35 @@ run_fast_cnv_pipeline <- function(
     cnv_events,
     min_references = min_references
   )
-  
-  
-  list(
-    cnvs_per_segment   = table_with_equiv_id, # one row per segment, with equiv IDs - IDs which tells which CNVs overlap each other
-    cnvs_summarized    = cnv_events,          # one row per equiv group, with support counts
-    cnvs_supported     = supported_events,    # filtered to min_references threshold
-    removed_log        = equiv$removed_log    #segments that were removed for numerous reason
+
+  final_consistent_events <-resolve_shared_cliques(
+    all_segments = table_with_equiv_id, 
+    consistent = supported_events, 
+    coord_cols = c("cell_name", "chr", "cnv_state", "start", "end","cnv_length", "cnv_length_mb", "reference"),
+    min_overlap    = min_overlap_multiple_nodes,
+    overlap_method = overlap_method_equiv_cnv_after_filter,
+    clique_mode    = clique_mode_consistent,
+    parallel       = parallel,
+    n_cores        = cores
   )
+  
+  if(removed_log_retur){
+    list(
+      cnvs_per_segment   = table_with_equiv_id, # one row per segment, with equiv IDs - IDs which tells which CNVs overlap each other
+      cnvs_summarized    = cnv_events,          # one row per equiv group, with support counts
+      cnvs_supported     = supported_events,    # filtered to min_references threshold
+      removed_log        = equiv$removed_log,    #segments that were removed for numerous reason
+      cnvs_supported_overlaped = final_consistent_events #segments that are in multiple calls are assess for overlap and if they pass the threshold the segment increases
+    )
+  } else{
+    list(
+      cnvs_per_segment   = table_with_equiv_id, # one row per segment, with equiv IDs - IDs which tells which CNVs overlap each other
+      cnvs_summarized    = cnv_events,          # one row per equiv group, with support counts
+      cnvs_supported     = supported_events,    # filtered to min_references threshold
+      cnvs_supported_overlaped = final_consistent_events #segments that are in multiple calls are assess for overlap and if they pass the threshold the segment increases
+    )
+  }
+
 }
 
 

@@ -527,9 +527,10 @@ find_maximal_cliches <- function(q_pass, s_pass, grp){
   # Count duplicated segments — those appearing in more than one clique
   n_duplicated <- sum(vapply(
     segment_clique_map[connected_idx],
-    function(x) length(x) > 1L,
-    logical(1)
+    function(x) max(0L, length(x) - 1L),
+    integer(1)
   ))
+  
   
   total_duplicated <- total_duplicated + n_duplicated
   
@@ -537,7 +538,7 @@ find_maximal_cliches <- function(q_pass, s_pass, grp){
   # Each segment is emitted once per clique it belongs to
   # Isolated segments (no passing overlap partner) are dropped — NA equiv_id
   group_output <- vector("list", length(connected_idx))
-  unresolved_row <- c()
+  unresolved_rows <- vector("list", length(connected_idx)) 
   for (j in seq_along(connected_idx)) {
     seg_idx    <- connected_idx[j]
     clique_ids <- segment_clique_map[[seg_idx]]
@@ -559,21 +560,34 @@ find_maximal_cliches <- function(q_pass, s_pass, grp){
   isolated_rows <- grp[isolated_idx, ]
   isolated_rows$removal_reason <- "non_overlap (isolated)"
   
-  if (!is.null(unresolved_row)){
-    removed_log <- bind_rows(unresolved_row,isolated_rows)
+  if (!is.null(unresolved_rows)){
+    unresolved_rows <- do.call(rbind, unresolved_rows)
+    removed_log <- bind_rows(unresolved_rows,isolated_rows)
   }else{
     removed_log <- bind_rows(isolated_rows)
   }
   
+  if (length(connected_idx) + n_duplicated != nrow(dplyr::bind_rows(group_output))) {
+    rows_groups<-  nrow(dplyr::bind_rows(group_output))
+    stop(sprintf(
+      "DETAIL that somethings is WRONG. Check this numbers they should add up!  
+       connected=%d, isolated=%d, n_duplicated=%d, group_output_rows=%d",
+      length(connected_idx),
+      length(isolated_idx),
+      n_duplicated,
+      rows_groups
+    ))
+  }
   
   return(list(rows =  dplyr::bind_rows(group_output), 
               n_duplicated = total_duplicated, removed = removed_log))
-}
+  }
+
 
 
 process_cnv_cluster <- function(grp,overlap_method,min_ovelap){
   n   <- nrow(grp)
-  
+
   # Single-segment group — trivially its own equivalence class
   if (n == 1L) {
     removed_log <- grp
@@ -601,7 +615,7 @@ process_cnv_cluster <- function(grp,overlap_method,min_ovelap){
   
   q_idx <- S4Vectors::queryHits(hits)
   s_idx <- S4Vectors::subjectHits(hits)
-  
+
   scores <- compute_overlap(
     q_start = grp$start[q_idx],
     q_end   = grp$end[q_idx],
@@ -622,8 +636,9 @@ process_cnv_cluster <- function(grp,overlap_method,min_ovelap){
     grp$local_clique_id <- seq_len(n)
     return(list(rows = grp[0,], n_duplicated = 0L, removed = removed_log))
   }
-  
+
   res <- find_maximal_cliches(q_pass, s_pass,grp)
+  
   
   return(res)
   
@@ -638,63 +653,68 @@ assign_cnv_equivalence <- function(
     overlap_method         = "reciprocal",
     filter_seq_mb          = 7,
     parallel               = FALSE,
+    by_columns = c("cell_name", "chr", "cnv_state"),
     n_cores = 1L
 ) {
   
-  required_cols <- c("cell_name", "chr", "cnv_state", "start", "end")
-  missing_cols  <- setdiff(required_cols, colnames(df))
-  
   # ---- Input validation ---------------------------------------------------
-  required_cols <- c("cell_name", "chr", "cnv_state", "start", "end", "reference")
-  missing_cols  <- setdiff(required_cols, colnames(df))
-  if (length(missing_cols) > 0) {
+  missing_cols  <- setdiff(c(by_columns, "start", "end"), colnames(df))
+  if (length(missing_cols) > 0L) {
     stop("Missing required columns: ", paste(missing_cols, collapse = ", "))
   }
+  
   if (any(df$start > df$end, na.rm = TRUE)) {
     stop("Detected rows where start > end. Check upstream segmentation.")
   }
   
-  # ---- Pre-filter ---------------------------------------------------------
-  n_rows_input <- nrow(df)
-  
-  df <- df |>
-    dplyr::arrange(cell_name, chr, cnv_state, start) |>
-    dplyr::mutate(
-      cnv_length    = end - start + 1L,
-      cnv_length_mb = cnv_length / 1e6
-    ) |>
-    dplyr::filter(cnv_length_mb > filter_seq_mb)
-  
-  n_rows_postfilter <- nrow(df)
-  n_rows_removed    <- n_rows_input - n_rows_postfilter
-  
-  message(sprintf(
-    "Pre-filter: %d input rows → %d retained (%.1f%% removed) with length > %.0f Mb",
-    n_rows_input,
-    n_rows_postfilter,
-    100 * n_rows_removed / n_rows_input,
-    filter_seq_mb
-  ))
-  
-  if (n_rows_postfilter == 0L) {
-    stop(sprintf(
-      "No segments remain after length filter (> %.0f Mb). ",
-      "Consider lowering filter_seq_mb (currently %.0f).",
-      filter_seq_mb, filter_seq_mb
-    ))
+
+  cnv_missing_collumns <- setdiff(c("cnv_length_mb","cnv_length"), colnames(df))
+  if(length(cnv_missing_collumns) > 0L){
+    df <- df |>
+      dplyr::arrange(cell_name, chr, cnv_state, start) |>
+      dplyr::mutate(
+        cnv_length    = end - start + 1L,
+        cnv_length_mb = cnv_length / 1e6
+      )
   }
+  
+  # ---- Pre-filter ---------------------------------------------------------
+  if(filter_seq_mb > 0L) {
+    n_rows_input <- nrow(df)
+    df <- df |>
+      dplyr::filter(cnv_length_mb > filter_seq_mb)
+    
+    n_rows_postfilter <- nrow(df)
+    n_rows_removed    <- n_rows_input - n_rows_postfilter
+    
+    message(sprintf(
+      "Pre-filter: %d input rows → %d retained (%.1f%% removed) with length > %.0f Mb",
+      n_rows_input,
+      n_rows_postfilter,
+      100 * n_rows_removed / n_rows_input,
+      filter_seq_mb
+    ))
+    
+    if (n_rows_postfilter == 0L) {
+      stop(sprintf(
+        "No segments remain after length filter (> %.0f Mb). ",
+        "Consider lowering filter_seq_mb (currently %.0f).",
+        filter_seq_mb, filter_seq_mb
+      ))
+    }
+  }
+  n_rows_postfilter <- nrow(df)
   
   # ---- Split into groups --------------------------------------------------
   
-  # Split into (cell_name x chr x cnv_state) groups
   group_indices <- df |>
     dplyr::mutate(.row_idx = dplyr::row_number()) |>
-    dplyr::group_by(cell_name, chr, cnv_state) |>
+    dplyr::group_by(dplyr::across(all_of(by_columns))) |>
     dplyr::group_split()
   
   
-  message(sprintf("Processing %d groups (cell x chr x cnv_state combinations)",
-                  length(group_indices)))
+  message(sprintf("Processing %d groups (%s combinations)",
+                  length(group_indices), paste(by_columns, collapse = " x ")))
   
   # ---- Step 1: process groups ---------------------------------------------
   
@@ -721,15 +741,15 @@ assign_cnv_equivalence <- function(
   # Human readable — carries its own context for debugging
   n_duplicated_vec <- vapply(results, `[[`, integer(1), "n_duplicated")
   total_duplicated <- sum(n_duplicated_vec)
-  
+
   
   result <- purrr::map(results, ~ {
-    .x$rows$cnv_equiv_id <- paste(
-      .x$rows$cell_name,
-      .x$rows$chr,
-      .x$rows$cnv_state,
-      .x$rows$local_clique_id,
-      sep = "|"
+    .x$rows$cnv_equiv_id <- do.call(
+      paste,
+      c(
+        as.list(.x$rows[, c(by_columns, "local_clique_id")]),
+        sep = "|"
+      )
     )
     .x$rows$local_clique_id <- NULL
     .x$rows
@@ -761,7 +781,7 @@ assign_cnv_equivalence <- function(
     stop(sprintf(
       "Removed items: output has %d rows supposedly removed while removed log has %d. Check find_maximal_cliques.",
       n_removed,
-      sum(removed_log$removal_reason == "isolated")
+      nrow(removed_log)
     ))
   }
   
@@ -778,9 +798,9 @@ assign_cnv_equivalence <- function(
     "  Final output:                                        %d"
   ),
   n_rows_postfilter,
-  sum(removed_log$removal_reason == "isolated"),
+  sum(removed_log$removal_reason == "non_overlap (isolated)"),
   sum(removed_log$removal_reason == "single_sequence"),
-  sum(removed_log$removal_reason == "inconsistent overall with the selected threshold"),
+  sum(removed_log$removal_reason == "non overall (threshold based)"),
   sum(removed_log$removal_reason == "0 hits"),
   nrow(removed_log),
   total_duplicated,
@@ -805,23 +825,14 @@ assign_cnv_equivalence <- function(
     ))
   }
   
-  # Check 3: every cnv_equiv_id within a (cell, chr, state) group
+  # Check 3: every cnv_equiv_id within a group
   # should correspond to at least one row — no phantom IDs
   equiv_counts <- result |>
-    dplyr::group_by(cell_name, chr, cnv_state, cnv_equiv_id) |>
+    dplyr::group_by( dplyr::across(all_of(c(by_columns,"cnv_equiv_id")))) |>
     dplyr::summarise(n = dplyr::n(), .groups = "drop")
   
   if (any(equiv_counts$n == 0L)) {
     warning("Some cnv_equiv_id values have zero rows — this should not happen.")
-  }
-  
-  # Check 4: cnv_equiv_id format sanity — all should follow cell|chr|state|id
-  malformed <- sum(!grepl("^.+\\|chr.+\\|.+\\|\\d+$", result$cnv_equiv_id))
-  if (malformed > 0L) {
-    warning(sprintf(
-      "%d cnv_equiv_id values do not match expected format cell|chr|state|id.",
-      malformed
-    ))
   }
   
   message(sprintf(
@@ -940,10 +951,6 @@ identify_duplicated_segments <- function(
     duplicate_list  = duplicate_list
   )
 }
-
-
-
-
 
 
 resolve_duplicate_overlaps <- function(
@@ -1232,6 +1239,7 @@ run_fast_cnv_pipeline <- function(
   
   table_with_equiv_id <- equiv$results_id
   
+ 
   cnv_events <- summarize_cnv_support(table_with_equiv_id)
   
   message("→ Filtering CNVs by reference support")
@@ -1518,6 +1526,15 @@ add_chromosome_info <- function(main_df,
 
 
 
+############################################################################################################-
+############################# Across and Within Cell type Integration Approach##############################
+############################################################################################################-
+
+std_events <- function(tbl, dataset, mode){
+  tbl %>%
+    mutate(cell_type = dataset, mode = mode,
+           ds_cell = paste(cell_type, cell_name, sep="|"))
+}
 
 
 

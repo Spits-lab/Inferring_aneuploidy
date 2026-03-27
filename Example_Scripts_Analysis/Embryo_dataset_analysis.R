@@ -80,7 +80,7 @@ pairwise_length_diff %>%
 
 overlap_diff <- purrr::map(group_split_per_cell, ~ {
   grp <- .x
-  
+
   gr <- GenomicRanges::GRanges(
     seqnames = grp$chr,
     ranges   = IRanges::IRanges(start = grp$start, end = grp$end),
@@ -115,8 +115,10 @@ overlap_diff <- purrr::map(group_split_per_cell, ~ {
     cnv_equiv_id_b = grp$merge_group_id[uniq_comb$s_idx],
     start_a        = grp$start[uniq_comb$q_idx],
     end_a          = grp$end[uniq_comb$q_idx],
+    cnv_length_mb_a = grp$cnv_length_mb[uniq_comb$q_idx],
     start_b        = grp$start[uniq_comb$s_idx],
     end_b          = grp$end[uniq_comb$s_idx],
+    cnv_length_mb_b =grp$cnv_length_mb[uniq_comb$s_idx],
     overlap_score  = scores
   )
 }) |>
@@ -128,7 +130,6 @@ overlap_diff <- purrr::map(group_split_per_cell, ~ {
 overlap_diff %>%
   ggplot( aes(x= overlap_score)) +
   geom_density(fill="#69b3a2", color="#e9ecef", alpha=0.8) 
-
 
 
 
@@ -232,16 +233,14 @@ cnv_total <- cnv_total %>%
 
 all_events <- cnv_total %>%
   mutate(
-    event_id = row_number(),
-    ds_cell = paste(cell_type, cell_name, sep = "|"),
-    event_width = end - start + 1
-  )
+    ds_cell = paste(cell_type, cell_name, sep = "|"))
 
 
 #Analysis of CNV segment frequency based on the embryo
-clustered_events <- run_cnv_locus_analysis(all_events, by = c("embryo"), min_recip = 0.80, cluster_mode = "complete", sample_col = "embryo")
+clustered_events <- run_cnv_locus_analysis(all_events, by = c("embryo"), overlap_method = "reciprocal", min_ovelap = 0.8, sample_col = "embryo",removed_log_retur = T )
 
 #Number of cells detected per embryo
+
 n <- lapply(unique(cnv_total$embryo), function(embryo){
   data.frame(cell_type = embryo, n_total_cells = sum(grepl(embryo,colnames(seurat_obj))))
 })
@@ -285,7 +284,7 @@ library(dplyr)
 
 cnv_filtered<- res_scores %>%
   filter(confidence == "high")
-
+#cnv_filtered_new <- cnv_filtered
 
 # 1. Prepare genome (once per hg38)
 genome_structure <- prepare_genome_structure(chromosome_arms)

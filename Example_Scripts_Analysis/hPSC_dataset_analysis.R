@@ -45,7 +45,7 @@ source("~/GitHub/Inferring_aneuploidy/R/GSEA.R")
 ############################# Across and Within Cell type Integration Approach##############################
 ############################################################################################################-
 
-base_dir <- "C:/Users/pmgra/Documents/VUB/FWO_Claudia/D7_hPSC/final_data/"
+base_dir <- "C:/Users/pmgra/Documents/VUB/FWO/2026_03_FWO_Claudia/D7_hPSC/final_data/"
 
 
 main_folder <- c("across", "within")
@@ -72,33 +72,31 @@ r <- setNames(
 
 
 # ---------- 2) Standardize tables ----------
-std_events <- function(tbl, dataset, mode){
-  tbl %>%
-    mutate(dataset = dataset, mode = mode) %>%
-    select(dataset, mode, cell_name, chr, start, end, cnv_state, everything())
-}
-
-get_dataset <- function(x) sub("_.*", "", x)
 
 across_tbl <- bind_rows(
-  lapply(names(r$across), \(ds)
-         std_events(r$across[[ds]], get_dataset(ds), "across")
+  lapply(names(r$across),function(ds){
+    cell_type <-  sub("_.*", "", ds)
+    std_events(r$across[[ds]], cell_type, "across")
+  }
   )
 )
 
 within_tbl <- bind_rows(
-  lapply(names(r$within), \(ds)
-         std_events(r$within[[ds]], get_dataset(ds), "within")
+  lapply(names(r$within),function(ds){
+    cell_type <-  sub("_.*", "", ds)
+    std_events(r$within[[ds]], cell_type, "within")
+  }
   )
 )
-req_cols <- c("dataset","cell_name","chr","start","end","cnv_state","mode")
+
+
+req_cols <- c("cell_type","cell_name","chr","start","end","cnv_state","mode", "ds_cell")
+
 stopifnot(all(req_cols %in% colnames(across_tbl)))
 stopifnot(all(req_cols %in% colnames(within_tbl)))
 
-# ---------- 3) Pre-filter to shared cells (and shared datasets) ----------
+# ---------- 3) Pre-filter to shared cells (and shared cell_types) ----------
 # This removes events from cells that do not exist in both modes.
-within_tbl <- within_tbl %>% mutate(ds_cell = paste(dataset, cell_name, sep="|"))
-across_tbl <- across_tbl %>% mutate(ds_cell = paste(dataset, cell_name, sep="|"))
 
 shared_ds_cell <- intersect(unique(within_tbl$ds_cell), unique(across_tbl$ds_cell))
 
@@ -118,7 +116,7 @@ to_gr <- function(df, prefix){
   )
 }
 make_grp <- function(df){
-  paste(df$dataset, df$cell_name, df$chr, df$cnv_state, sep="|")
+  paste(df$cell_type, df$cell_name, df$chr, df$cnv_state, sep="|")
 }
 
 within_f <- within_f %>% mutate(grp = make_grp(.), within_row = row_number())
@@ -184,7 +182,7 @@ pairs_common <- pairs_common %>%
 # (Optional extra safety; should already be true due to grp)
 pairs_common <- pairs_common %>%
   filter(
-    dataset_within == dataset_across,
+    cell_type_within == cell_type_across,
     cell_name_within == cell_name_across,
     chr_within == chr_across,
     cnv_state_within == cnv_state_across
@@ -210,8 +208,8 @@ summary_counts <- list(
   n_across_only = nrow(across_only)
 )
 
-summary_by_dataset <- pairs_common %>%
-  count(dataset_within, cnv_state_within, chr_within, name = "n_common") %>%
+summary_by_cell_type <- pairs_common %>%
+  count(cell_type_within, cnv_state_within, chr_within, name = "n_common") %>%
   arrange(desc(n_common))
 
 # ---------- 8) Save final object ----------
@@ -225,7 +223,7 @@ final_obj <- list(
   within_only = within_only %>% select(-ds_cell, -grp),
   across_only = across_only %>% select(-ds_cell, -grp),
   summary_counts = summary_counts,
-  summary_by_dataset = summary_by_dataset
+  summary_by_cell_type = summary_by_cell_type
 )
 
 
@@ -273,13 +271,13 @@ cnv_total <- add_chromosome_info(supported_events,
 all_events <- cnv_total %>%
   mutate(
     event_id = row_number(),
-    ds_cell = paste(dataset, cell_name, sep = "|"),
+    ds_cell = paste(cell_type, cell_name, sep = "|"),
     event_width = end - start + 1
   )
 
 
 
-clustered_events <- run_cnv_locus_analysis(all_events, min_recip = 0.8, cluster_mode = "complete",sample_col = "dataset")
+clustered_events <- run_cnv_locus_analysis(all_events, min_recip = 0.8, cluster_mode = "complete",sample_col = "cell_type")
 
 celltype_sizes <- celltype_sizes <- c(
   Undifferentiated = 437,
@@ -303,15 +301,15 @@ min_thr <- resolve_celltype_thresholds(
 high_thr <- min_thr
 colnames(high_thr)[colnames(high_thr) == "min_cells_keep"] <- "high_min_cells"
 
-colnames(high_thr)[colnames(high_thr) == "cell_type"] <- "dataset"
-colnames(min_thr)[colnames(min_thr) == "cell_type"] <- "dataset"
+colnames(high_thr)[colnames(high_thr) == "cell_type"] <- "cell_type"
+colnames(min_thr)[colnames(min_thr) == "cell_type"] <- "cell_type"
 
 res_scores <- score_cnv_clusters(
   clustered_events$cnv_locus_summary,
   clustered_events$clustered_events,
   min_threshold_df = min_thr,
   high_threshold_df = high_thr,
-  threshold_group_col = "dataset",
+  threshold_group_col = "cell_type",
   min_length_mb = 25
 )
 
@@ -319,15 +317,15 @@ cnv_filtered <- res_scores %>%
   filter(confidence == "high")
 cnv_filtered$
 
-table_df <- cnv_filtered[,c("cell_name","dataset")]
+table_df <- cnv_filtered[,c("cell_name","cell_type")]
 df <- df  %>% distinct()
-table(cnv_filtered$dataset,cnv_filtered$mode)
+table(cnv_filtered$cell_type,cnv_filtered$mode)
 View(distinct(df))
 ########################################################################### -
 ##############################Chromossome Ploting##########################
 ############################################################################ -
 
-cnv_filtered <- cnv_filtered %>% arrange(dataset,chr)
+cnv_filtered <- cnv_filtered %>% arrange(cell_type,chr)
 
 # 1. Prepare genome (once per hg38)
 genome_structure <- prepare_genome_structure(chromosome_arms)
@@ -346,18 +344,18 @@ cnv_mapped <- map_cnv_to_genome(
 # 4. Compute embryo boundaries (once)
 
 cnv_mapped <- cnv_mapped %>%
-  arrange(dataset,chr) %>%   # must match your plot order
+  arrange(cell_type,chr) %>%   # must match your plot order
   mutate(plot_idx = row_number())
 
 cnv_mapped <- cnv_mapped %>%
-  mutate(dataset = factor(dataset))
+  mutate(cell_type = factor(cell_type))
 
-cnv_mapped$dataset
-dataset_boundaries <- cnv_mapped %>%
-  group_by(dataset) %>%
+cnv_mapped$cell_type
+cell_type_boundaries <- cnv_mapped %>%
+  group_by(cell_type) %>%
   summarise(max_idx = max(plot_idx), .groups = "drop")
 
-boundary_lines <- head(dataset_boundaries$max_idx + 0.5, -1)
+boundary_lines <- head(cell_type_boundaries$max_idx + 0.5, -1)
 
 
 # 5. Plot
@@ -692,10 +690,10 @@ genome_burden_expr <- compute_percent_genome_imbalanced(cnv_filtered, genome_siz
 genome_burden <- compute_percent_genome_imbalanced(cnv_filtered, genome_size_bp = genome_size_bp)
 
 expression_segments <- genome_burden_expr %>%
-  left_join(cnv_filtered %>%select(cell_name, dataset), by = c("cell" = "cell_name"))
+  left_join(cnv_filtered %>%select(cell_name, cell_type), by = c("cell" = "cell_name"))
 
 genome_segments <- genome_burden %>%
-  left_join(cnv_filtered %>%select(cell_name, dataset), by = c("cell" = "cell_name"))
+  left_join(cnv_filtered %>%select(cell_name, cell_type), by = c("cell" = "cell_name"))
 
 
 head(genome_burden_expr)
@@ -710,9 +708,9 @@ cols <- c(
   "#e7298a"
 )
 
-g <- ggplot(expression_segments, aes(x = dataset, y = pct_genome_imbalanced, fill = dataset)) +
+g <- ggplot(expression_segments, aes(x = cell_type, y = pct_genome_imbalanced, fill = cell_type)) +
   geom_boxplot(outlier.shape = NA, alpha = 0.7) +
-  geom_jitter(aes(color = dataset), width = 0.15, alpha = 0.4, size = 1) +
+  geom_jitter(aes(color = cell_type), width = 0.15, alpha = 0.4, size = 1) +
   scale_fill_manual(values = cols) +
   scale_color_manual(values = cols) +
   theme_bw() +
@@ -722,9 +720,9 @@ g <- ggplot(expression_segments, aes(x = dataset, y = pct_genome_imbalanced, fil
     y = "% whole expressed genes imbalanced"
   )
 
-p <- ggplot(genome_segments, aes(x = dataset, y = pct_genome_imbalanced, fill = dataset)) +
+p <- ggplot(genome_segments, aes(x = cell_type, y = pct_genome_imbalanced, fill = cell_type)) +
   geom_boxplot(outlier.shape = NA, alpha = 0.7) +
-  geom_jitter(aes(color = dataset), width = 0.15, alpha = 0.5, size = 1) +
+  geom_jitter(aes(color = cell_type), width = 0.15, alpha = 0.5, size = 1) +
   scale_fill_manual(values = cols) +
   scale_color_manual(values = cols) +
   theme_bw() +

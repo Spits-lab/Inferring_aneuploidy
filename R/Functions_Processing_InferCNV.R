@@ -129,7 +129,7 @@ load_tool_data <- function(
 
 process_tool_cnv_runs <- function(
     base_dir,
-    modes                                = c("within", "across"),
+    mode                                = c("within", "across"),
     tool                                 = "infercnv",
     pattern                              = "^run\\.final",
     max_gap                              = 100000,
@@ -153,7 +153,7 @@ process_tool_cnv_runs <- function(
   }
   
   # ---- Validate modes directories exist -----------------------------------
-  missing_mode_dirs <- modes[!dir.exists(file.path(base_dir, modes))]
+  missing_mode_dirs <- mode[!dir.exists(file.path(base_dir, mode))]
   if (length(missing_mode_dirs) > 0L) {
     stop(
       "Mode directories not found in base_dir: ",
@@ -162,18 +162,16 @@ process_tool_cnv_runs <- function(
   }
   
   # ---- Run pipeline per mode and cell type --------------------------------
-  results <- purrr::map(modes, \(mode) {
+  cell_dir   <- file.path(base_dir, mode)
+  cell_types <- list.files(cell_dir)
     
-    cell_dir   <- file.path(base_dir, mode)
-    cell_types <- list.files(cell_dir)
-    
-    if (length(cell_types) == 0L) {
+  if (length(cell_types) == 0L) {
       warning(sprintf("No cell types found in %s — skipping mode '%s'.", 
                       cell_dir, mode))
       return(NULL)
-    }
+  }
     
-    ct_results <- purrr::map(cell_types, \(ct) {
+  ct_results <- purrr::map(cell_types, \(ct) {
     
       ct_dir   <- file.path(cell_dir, ct)
       refs_dir <- list.files(ct_dir, full.names = T)
@@ -217,10 +215,6 @@ process_tool_cnv_runs <- function(
     
     names(ct_results) <- cell_types
     ct_results
-  })
-  
-  names(results) <- modes
-  results
 }
 
 #' Convert a wide expression matrix to long format
@@ -1843,7 +1837,7 @@ run_full_cnv_pipeline <- function(
   metadata          = NULL,
   cell_type_col     = "cell_type",
   gene_order_file   = NULL,
-  modes              = c("both", "within", "across"),
+  modes              = c("within", "across"),
   chr_exclude       = c("MT", "Y"),
   min_max_counts    = c(100, 1e6),
   n_splits_within   = 3,
@@ -2000,7 +1994,7 @@ run_full_cnv_pipeline <- function(
     
     full_results <- process_tool_cnv_runs(
       base_dir                              = base_dir,
-      modes                                 = modes,
+      mode                                  = modes,
       tool                                  = tool,
       pattern                               = pattern,
       max_gap                               = max_gap,
@@ -2018,7 +2012,6 @@ run_full_cnv_pipeline <- function(
       metadata                              = metadata
     )
     
-    browser()
     # Extract supported events — the key output for downstream blocks
     supported_events <- purrr::map(full_results, \(x) {
       x[["cnvs_supported_overlaped"]]
@@ -2082,7 +2075,6 @@ run_full_cnv_pipeline <- function(
       results$block2$supported_events
     }
     
-    if (!is.null(precomputed$metadata)) metadata <- precomputed$metadata
     if (is.null(metadata)) stop("metadata required for block3.")
     
     message("\n[3/4] Annotating CNV events...")

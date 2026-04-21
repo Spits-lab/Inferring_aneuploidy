@@ -18,7 +18,7 @@ source("~/GitHub/Inferring_aneuploidy/R/Score_system.R")
 source("~/GitHub/Inferring_aneuploidy/R/GSVA.R")
 source("~/GitHub/Inferring_aneuploidy/R/GSEA.R")
 
-
+load("C:/Users/pmgra/Documents/VUB/InferCNV/chromossome_arms.RData")
 load("C:/Users/pmgra/Documents/VUB/InferCNV/Petropoulous__2016/25022026_Petrokaryotyped_dataset.RData")
 
 
@@ -59,7 +59,66 @@ obj_list <- make_infercnv_objects(
 )
 
 
+cell_sizes <- compute_cell_sizes(
+  metadata,
+  group_cols = "embryo",
+  cell_col = "cell_name"
+)
 
+test_run <- run_full_cnv_pipeline(
+  start_from = "block2",
+  save_intermediate = T,
+  outdir            = "C:/Users/pmgra/Documents/VUB/Experimental_code/test_output/",
+  counts_mx         = counts_mx,
+  metadata          = metadata,
+  cell_type_col     = "cell_type",
+  gene_order_file   = "~/VUB/InferCNV/InferCNV_RScripts/hg38_gencode_v27.txt",
+  mode              = "within",
+  chr_exclude       = c("MT", "Y"),
+  min_max_counts    = c(100, 1e6),
+  n_splits_within   = 3,
+  base_outdir       = "C:/Users/pmgra/Documents/VUB/InferCNV/TE_cells_Petroupoulous_02172026",
+  cutoff            = 0.1,
+  cluster_by_groups = TRUE,
+  HMM               = FALSE,
+  denoise           = TRUE,
+  analysis_mode     = "subclusters",
+  window_length     = 140,
+  no_plot           = TRUE,
+  resume_if_exists  = TRUE,
+  base_dir                              = NULL,
+  modes                                 = c("within"),
+  tool                                  = "infercnv",
+  pattern                               = "^run\\.final",
+  max_gap                               = 100000,
+  min_overlap_consistent_calls          = 0.75,
+  min_overlap_multiple_nodes            = 0.6,
+  filter_seq_mb_init                    = 5,
+  filter_seq_mb_equiv                   = 7,
+  min_references                        = 2,
+  overlap_method_equiv_cnv_call_merge   = "reciprocal",
+  overlap_method_equiv_cnv_after_filter = "reciprocal",
+  parallel                              = FALSE,
+  cores                                 = 1L,
+  clique_mode_consistent                = "connected",
+  removed_log_return                    = FALSE,
+  chromosome_arms   = chromosome_arms,
+  group_cols        = "embryo",
+  cell_col          = "cell_name",
+  chr_col           = "chr",
+  start_col         = "start",
+  end_col           = "end",
+  by                          = c("embryo", "cnv_State"),
+  sample_col                  = "embryo",
+  overlap_method              = "reciprocal",
+  min_overlap                 = 0.8,
+  boundaries_mb               = c(25, 10),
+  base_fraction               = 0.05,
+  step                        = 0.05,
+  min_cap_threshold           = 5L,
+  max_cap_threshold           = 25L,
+  total_chromosome_permission = 65
+) 
 ############################################################################### -
 ############### Initial Processing of InferCNV Calls ##########################
 ############################################################################### -
@@ -193,7 +252,7 @@ plot_all_cnv_distributions(supported_events,c(5, 25, 50))
 
 library(readr)
 library(dplyr)
-load("C:/Users/pmgra/Documents/VUB/InferCNV/chromossome_arms.RData")
+
 
 sp <- chromosome_arms %>%
   group_split(chr)

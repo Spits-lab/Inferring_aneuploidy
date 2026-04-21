@@ -54,7 +54,7 @@ test_run <- run_full_cnv_pipeline(
   metadata          = metadata,
   cell_type_col     = "cell_type",
   gene_order_file   = "~/VUB/InferCNV/InferCNV_RScripts/hg38_gencode_v27.txt",
-  mode              = "within",
+  modes              = "within",
   chr_exclude       = c("MT", "Y"),
   min_max_counts    = c(100, 1e6),
   n_splits_within   = 3,
@@ -67,8 +67,7 @@ test_run <- run_full_cnv_pipeline(
   window_length     = 140,
   no_plot           = TRUE,
   resume_if_exists  = TRUE,
-  base_dir                              = NULL,
-  modes                                 = c("within"),
+  base_dir                              = "C:/Users/pmgra/Documents/VUB/InferCNV/Edouard/new_data/",
   tool                                  = "infercnv",
   pattern                               = "^run\\.final",
   max_gap                               = 100000,
@@ -102,6 +101,7 @@ test_run <- run_full_cnv_pipeline(
 ) 
 
 
+cnv_filtered <- test_run[["block4"]][["scored_events"]]
 
 test <- process_tool_cnv_runs(
     base_dir = "C:/Users/pmgra/Documents/VUB/InferCNV/Edouard/new_data/",
@@ -133,7 +133,6 @@ hepsc <- test
 
 load("C:/Users/pmgra/Documents/VUB/InferCNV/chromossome_arms.RData")
 
-lapply(hepsc[["within"]], function(x){find("cnvs_supported_overlaped",names(x))})
 
 f_df <- lapply(hepsc[["within"]], function(x) {
   x[["cnvs_supported_overlaped"]]
@@ -176,7 +175,7 @@ res_scores_within <- score_cnv_clusters(
   round_fun = ceiling
 )
 
-cnv_filtered <- res_scores_within |>
+cnv_filtered <- cnv_filtered |>
   dplyr::filter(tier == 1)
 
 

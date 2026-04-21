@@ -45,377 +45,180 @@ source("~/GitHub/Inferring_aneuploidy/R/GSEA.R")
 ############################# Across and Within Cell type Integration Approach##############################
 ############################################################################################################-
 
-base_dir <- "C:/Users/pmgra/Documents/VUB/FWO/2026_03_FWO_Claudia/D7_hPSC/final_data/"
+test_run <- run_full_cnv_pipeline(
+  precomputed = "C:/Users/pmgra/Documents/VUB/InferCNV/Edouard/new_data/",
+  start_from = "block2",
+  save_intermediate = T,
+  outdir            = "C:/Users/pmgra/Documents/VUB/Experimental_code/test_output/",
+  counts_mx         = counts_mx,
+  metadata          = metadata,
+  cell_type_col     = "cell_type",
+  gene_order_file   = "~/VUB/InferCNV/InferCNV_RScripts/hg38_gencode_v27.txt",
+  mode              = "within",
+  chr_exclude       = c("MT", "Y"),
+  min_max_counts    = c(100, 1e6),
+  n_splits_within   = 3,
+  base_outdir       = "C:/Users/pmgra/Documents/VUB/InferCNV/Edouard/new_data/",
+  cutoff            = 0.1,
+  cluster_by_groups = TRUE,
+  HMM               = FALSE,
+  denoise           = TRUE,
+  analysis_mode     = "subclusters",
+  window_length     = 140,
+  no_plot           = TRUE,
+  resume_if_exists  = TRUE,
+  base_dir                              = NULL,
+  modes                                 = c("within"),
+  tool                                  = "infercnv",
+  pattern                               = "^run\\.final",
+  max_gap                               = 100000,
+  min_overlap_consistent_calls          = 0.75,
+  min_overlap_multiple_nodes            = 0.6,
+  filter_seq_mb_init                    = 5,
+  filter_seq_mb_equiv                   = 7,
+  min_references                        = 2,
+  overlap_method_equiv_cnv_call_merge   = "reciprocal",
+  overlap_method_equiv_cnv_after_filter = "reciprocal",
+  parallel                              = FALSE,
+  cores                                 = 1L,
+  clique_mode_consistent                = "connected",
+  removed_log_return                    = FALSE,
+  chromosome_arms   = chromosome_arms,
+  group_cols        = "cell_type",
+  cell_col          = "cell_name",
+  chr_col           = "chr",
+  start_col         = "start",
+  end_col           = "end",
+  by                          = c("cell_type", "cnv_state"),
+  sample_col                  = "cell_type",
+  overlap_method              = "reciprocal",
+  min_overlap                 = 0.8,
+  boundaries_mb               = c(25, 10),
+  base_fraction               = 0.05,
+  step                        = 0.05,
+  min_cap_threshold           = 5L,
+  max_cap_threshold           = 25L,
+  total_chromosome_permission = 65
+) 
 
 
-main_folder <- c("across", "within")
 
-
-r <- setNames(
-  lapply(main_folder, function(folder){
-    
-  r_data <- list.files(paste0(base_dir, folder),full.names = T)
-  rnames <- list.files(paste0(base_dir, folder))
-  setNames(lapply(r_data, function(data_dir){
-    load(data_dir) 
-    
-    if(folder == "across"){
-      supported_events <- filter_cnv_events(
-        final_data[["cnvs_filtered"]],
-        min_references = 2
-      )
-    } else if(folder == "within"){
-      supported_events <- final_data[["cnv_support_tbl"]]
-    }
-  }), rnames)
-}), main_folder)
-
-
-# ---------- 2) Standardize tables ----------
-
-across_tbl <- bind_rows(
-  lapply(names(r$across),function(ds){
-    cell_type <-  sub("_.*", "", ds)
-    std_events(r$across[[ds]], cell_type, "across")
-  }
-  )
-)
-
-within_tbl <- bind_rows(
-  lapply(names(r$within),function(ds){
-    cell_type <-  sub("_.*", "", ds)
-    std_events(r$within[[ds]], cell_type, "within")
-  }
-  )
-)
-
-
-req_cols <- c("cell_type","cell_name","chr","start","end","cnv_state","mode", "ds_cell")
-
-stopifnot(all(req_cols %in% colnames(across_tbl)))
-stopifnot(all(req_cols %in% colnames(within_tbl)))
-
-# ---------- 3) Pre-filter to shared cells (and shared cell_types) ----------
-# This removes events from cells that do not exist in both modes.
-
-shared_ds_cell <- intersect(unique(within_tbl$ds_cell), unique(across_tbl$ds_cell))
-
-within_f <- within_tbl %>% filter(ds_cell %in% shared_ds_cell)
-across_f <- across_tbl %>% filter(ds_cell %in% shared_ds_cell)
-
-# 1) Convert tables -> GRanges, keeping a row id
-to_gr <- function(df, prefix){
-  stopifnot(all(c("chr","start","end","cell_name","cnv_state") %in% colnames(df)))
-  GRanges(
-    seqnames = df$chr,
-    ranges   = IRanges(start = df$start, end = df$end),
-    row_id   = seq_len(nrow(df)),
-    cell_name = df$cell_name,
-    cnv_state = df$cnv_state,
-    prefix    = prefix
-  )
-}
-make_grp <- function(df){
-  paste(df$cell_type, df$cell_name, df$chr, df$cnv_state, sep="|")
-}
-
-within_f <- within_f %>% mutate(grp = make_grp(.), within_row = row_number())
-across_f <- across_f %>% mutate(grp = make_grp(.), across_row = row_number())
-
-common_grps <- intersect(unique(within_f$grp), unique(across_f$grp))
-within_f <- within_f %>% filter(grp %in% common_grps)
-across_f <- across_f %>% filter(grp %in% common_grps)
-
-within_idx <- split(seq_len(nrow(within_f)), within_f$grp)
-across_idx <- split(seq_len(nrow(across_f)), across_f$grp)
-
-
-# ---------- 5) Overlap within each group + reciprocal overlap filter ----------
-min_recip <- 0.75
-
-pairs_list <- vector("list", length(common_grps))
-names(pairs_list) <- common_grps
-
-for(g in common_grps){
-  wi <- within_idx[[g]]
-  ai <- across_idx[[g]]
-  if(length(wi) == 0 || length(ai) == 0) next
-  
-  gr_w <- GRanges(
-    seqnames = within_f$chr[wi],
-    ranges   = IRanges(within_f$start[wi], within_f$end[wi]),
-    within_row = within_f$within_row[wi]
-  )
-  
-  gr_a <- GRanges(
-    seqnames = across_f$chr[ai],
-    ranges   = IRanges(across_f$start[ai], across_f$end[ai]),
-    across_row = across_f$across_row[ai]
-  )
-  
-  hits <- findOverlaps(gr_w, gr_a, ignore.strand = TRUE)
-  if(length(hits) == 0) next
-  
-  q <- queryHits(hits)
-  s <- subjectHits(hits)
-  
-  # Vectorized reciprocal overlap
-  inter <- width(pintersect(gr_w[q], gr_a[s]))
-  ok <- (inter / width(gr_w[q]) >= min_recip) & (inter / width(gr_a[s]) >= min_recip)
-  
-  if(any(ok)){
-    pairs_list[[g]] <- tibble(
-      within_row = mcols(gr_w)$within_row[q[ok]],
-      across_row = mcols(gr_a)$across_row[s[ok]]
-    )
-  }
-}
-
-pairs_common <- bind_rows(pairs_list)
-
-# Join back full rows
-pairs_common <- pairs_common %>%
-  left_join(within_f %>% select(within_row, everything()), by = "within_row") %>%
-  left_join(across_f %>% select(across_row, everything()), by = "across_row",
-            suffix = c("_within", "_across"))
-
-# (Optional extra safety; should already be true due to grp)
-pairs_common <- pairs_common %>%
-  filter(
-    cell_type_within == cell_type_across,
-    cell_name_within == cell_name_across,
-    chr_within == chr_across,
-    cnv_state_within == cnv_state_across
-  )
-
-# ---------- 6) Define within-only and across-only ----------
-within_only <- within_f %>%
-  anti_join(pairs_common %>% select(within_row) %>% distinct(), by = "within_row") %>%
-  select(-within_row)
-
-across_only <- across_f %>%
-  anti_join(pairs_common %>% select(across_row) %>% distinct(), by = "across_row") %>%
-  select(-across_row)
-
-# ---------- 7) Summaries ----------
-summary_counts <- list(
-  n_across_total = nrow(across_tbl),
-  n_within_total = nrow(within_tbl),
-  n_across_filtered = nrow(across_f),
-  n_within_filtered = nrow(within_f),
-  n_common_pairs = nrow(pairs_common),
-  n_within_only = nrow(within_only),
-  n_across_only = nrow(across_only)
-)
-
-summary_by_cell_type <- pairs_common %>%
-  count(cell_type_within, cnv_state_within, chr_within, name = "n_common") %>%
-  arrange(desc(n_common))
-
-# ---------- 8) Save final object ----------
-final_obj <- list(
-  params = list(min_recip = min_recip, min_references_across = 2),
-  across_tbl = across_tbl %>% select(-ds_cell),
-  within_tbl = within_tbl %>% select(-ds_cell),
-  across_filtered = across_f %>% select(-ds_cell, -grp),
-  within_filtered = within_f %>% select(-ds_cell, -grp),
-  pairs_common = pairs_common %>% select(-ds_cell_within, -ds_cell_across),
-  within_only = within_only %>% select(-ds_cell, -grp),
-  across_only = across_only %>% select(-ds_cell, -grp),
-  summary_counts = summary_counts,
-  summary_by_cell_type = summary_by_cell_type
+test <- process_tool_cnv_runs(
+    base_dir = "C:/Users/pmgra/Documents/VUB/InferCNV/Edouard/new_data/",
+    modes                                = c("within"),
+    tool                                 = "infercnv",
+    pattern                              = "^run\\.final",
+    max_gap                              = 100000,
+    min_overlap_consistent_calls         = 0.75,
+    min_overlap_multiple_nodes           = 0.6,
+    filter_seq_mb_init                  = 5,
+    filter_seq_mb_equiv                  = 7,
+    min_references                       = 2,
+    overlap_method_equiv_cnv_call_merge  = "reciprocal",
+    overlap_method_equiv_cnv_after_filter = "reciprocal",
+    parallel                             = FALSE,
+    cores                                = 1L,
+    clique_mode_consistent               = "connected",
+    removed_log_return                   = FALSE,
+    metadata = metadata
 )
 
 
-################################################################################# -
-############################# Chromossome Arm Info ##############################
-################################################################################ --
+
+
+save(test, file = "C:/Users/pmgra/Documents/VUB/FWO/2026_03_FWO_Claudia/D7_hPSC/test.RData")
+load("C:/Users/pmgra/Documents/VUB/FWO/2026_03_FWO_Claudia/D7_hPSC/test.RData")
+
+hepsc <- test
 
 load("C:/Users/pmgra/Documents/VUB/InferCNV/chromossome_arms.RData")
 
-#Merge cnv_overlap info with the information that we know about the chromossomes
+lapply(hepsc[["within"]], function(x){find("cnvs_supported_overlaped",names(x))})
 
-#reading rds object which is the initial processing phase seen above
-integrated_res <- readRDS("C:/Users/pmgra/Documents/VUB/2026_03_FWO_Claudia/integrated_across_within_common_minRecip0.75.rds")
-
-
-pairs_common_clean <- integrated_res$pairs_common %>%
-  select(ends_with("_within"),references_across) %>%
-  rename_with(~ sub("_within$", "", .x)) %>%
-  mutate(mode = "both") %>%
-  select(-grp)
-  
+f_df <- lapply(hepsc[["within"]], function(x) {
+  x[["cnvs_supported_overlaped"]]
+}) %>% bind_rows()
 
 
-supported_events <- bind_rows(integrated_res$across_only,
-                              integrated_res$within_only,
-                              pairs_common_clean)
+cnv_total_within_df <- add_chromosome_info(f_df,
+                                 chromosome_arms,
+                                 chr_col = "chr",
+                                 start_col = "start",
+                                 end_col = "end") 
 
-
-supported_events <- add_additional_columns(supported_events)
-
-cnv_total <- add_chromosome_info(supported_events,
-                                     chromosome_arms,
-                                     chr_col = "chr",
-                                     start_col = "start",
-                                     end_col = "end") 
+clustered_events_within <- run_cnv_locus_analysis(cnv_total_within_df, by = c("cell_type"), overlap_method = "reciprocal", min_ovelap = 0.8,removed_log_retur = T, sample_col = "cell_type", cell_col = "cell_name" )
 
 
 
-########################################################################### -
-################## Filtered and Scoring of CNV segments ###################
-########################################################################## -
+celltype_sizes <- metadata %>%
+  group_by(cell_type) %>%
+  summarise(
+    n_total_cells = n())
 
 
 
-all_events <- cnv_total %>%
-  mutate(
-    event_id = row_number(),
-    ds_cell = paste(cell_type, cell_name, sep = "|"),
-    event_width = end - start + 1
-  )
 
-
-
-clustered_events <- run_cnv_locus_analysis(all_events, min_recip = 0.8, cluster_mode = "complete",sample_col = "cell_type")
-
-celltype_sizes <- celltype_sizes <- c(
-  Undifferentiated = 437,
-  Neuroectoderm = 1099,
-  `Non neural ectoderm` = 412,
-  Amnion = 102
+res_scores_within <- score_cnv_clusters(
+  summary_df = clustered_events_within$cnv_locus_summary,
+  clustered_events = clustered_events_within$clustered_events,
+  cell_sizes = celltype_sizes,
+  by_union             = "cell_type",
+  boundaries_mb        = c(25, 10),
+  base_fraction        = 0.05,
+  step                 = 0.05,
+  fractions            = NULL,
+  threshold_method     = "auto",
+  threshold_mode       = "fractions",
+  min_cap_threshold    = 5L,
+  max_cap_threshold    = 25L,
+  max_tiers            = 2L,
+  total_chromosome_permission = 65,
+  round_fun = ceiling
 )
 
+cnv_filtered <- res_scores_within |>
+  dplyr::filter(tier == 1)
 
 
-min_thr <- resolve_celltype_thresholds(
-  celltype_sizes,
-  method = "fraction",
-  fraction = 0.05,
-  min_threshold = 3,
-  max_threshold = 25
-  )
+metadata_sub <- metadata[!(metadata$cell_name %in% cnv_filtered$cell_name), ]
+table(metadata_sub$cell_type)
 
-
-
-high_thr <- min_thr
-colnames(high_thr)[colnames(high_thr) == "min_cells_keep"] <- "high_min_cells"
-
-colnames(high_thr)[colnames(high_thr) == "cell_type"] <- "cell_type"
-colnames(min_thr)[colnames(min_thr) == "cell_type"] <- "cell_type"
-
-res_scores <- score_cnv_clusters(
-  clustered_events$cnv_locus_summary,
-  clustered_events$clustered_events,
-  min_threshold_df = min_thr,
-  high_threshold_df = high_thr,
-  threshold_group_col = "cell_type",
-  min_length_mb = 25
-)
-
-cnv_filtered <- res_scores %>% 
-  filter(confidence == "high")
-cnv_filtered$
-
-table_df <- cnv_filtered[,c("cell_name","cell_type")]
-df <- df  %>% distinct()
-table(cnv_filtered$cell_type,cnv_filtered$mode)
-View(distinct(df))
 ########################################################################### -
 ##############################Chromossome Ploting##########################
 ############################################################################ -
 
-cnv_filtered <- cnv_filtered %>% arrange(cell_type,chr)
-
 # 1. Prepare genome (once per hg38)
 genome_structure <- prepare_genome_structure(chromosome_arms)
-
 
 # 2. Map to genome
 cnv_mapped <- map_cnv_to_genome(
   cnv_filtered,
-  #cnv_filtered,
   genome_structure,
-  threshold = 80
+  threshold = 80,
+  arrange_df_cols = c("cell_type")
 )
 
 
+heatmap_plot <- prepare_cnv_plot(
+    cnv_mapped,
+    genome_structure,
+    grouping_cols = c("cell_type"),
+    state_colors  = c(
+      "gain" = "#E64B35",
+      "loss" = "royalblue4"))
+    
+    
+plot_cnv_karyotype(
+  heatmap_plot,
+    genome_structure,
+    ideogram_ratio  = 0.05,
+    arm_colors      = c(
+      "p"   = "paleturquoise4",
+      "cen" = "black",
+      "q"   = "red4"
+    ),
+    show_legend     = TRUE)
 
-# 4. Compute embryo boundaries (once)
-
-cnv_mapped <- cnv_mapped %>%
-  arrange(cell_type,chr) %>%   # must match your plot order
-  mutate(plot_idx = row_number())
-
-cnv_mapped <- cnv_mapped %>%
-  mutate(cell_type = factor(cell_type))
-
-cnv_mapped$cell_type
-cell_type_boundaries <- cnv_mapped %>%
-  group_by(cell_type) %>%
-  summarise(max_idx = max(plot_idx), .groups = "drop")
-
-boundary_lines <- head(cell_type_boundaries$max_idx + 0.5, -1)
-
-
-# 5. Plot
-
-ideogram_plot <- plot_ideogram(genome_structure,
-                               dim(cnv_filtered)[1],
-                               arm_colors = c("p"="#4DBBD5",
-                                              "cen"="black",
-                                              "q"="#E64B35")) 
-
-
-
-heatmap_plot <- plot_cnv_heatmap(
-  cnv_mapped,
-  genome_structure$chromosome_lengths,
-  boundary_lines = boundary_lines,
-  show_x_labels = T
-)
-
-
-
-
-#ggsave(filename="heat_FWO.jpeg",plot = combined_plot, width = 22, height = 10 ,units = "cm",dpi = 300)
-
-library(gridExtra)
-
-
-combined_plot <- assemble_heatmap_with_ideogram(heatmap_plot,
-                                                ideogram_plot,
-                                                cnv_mapped)
-
-
-legend_cnv <- cowplot::get_legend(
-  heatmap_plot + theme(legend.position = "right")
-)
-
-legend_arms <- cowplot::get_legend(
-  ideogram_plot + theme(legend.position = "right")
-)
-
-
-legend_combined <- plot_grid(
-  legend_cnv,
-  legend_arms,
-  ncol = 1,
-  align = "v"
-)
-
-final_grob <- arrangeGrob(
-  combined_plot,
-  legend_combined,
-  ncol = 2,
-  widths = c(0.9, 0.1) #for the heatmap to have more space than the legends which makes sense
-)
-
-library(grid)
-grid.newpage()
-grid.draw(
-  final_grob 
-)
 
 ######################################################################################### -
 ################################## GSEA Analysis ########################################

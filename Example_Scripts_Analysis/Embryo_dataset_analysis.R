@@ -19,6 +19,47 @@ source("~/GitHub/Inferring_aneuploidy/R/GSVA.R")
 source("~/GitHub/Inferring_aneuploidy/R/GSEA.R")
 
 
+load("C:/Users/pmgra/Documents/VUB/InferCNV/Petropoulous__2016/25022026_Petrokaryotyped_dataset.RData")
+
+
+seurat_cells <- subset(seu, predicted_celltype_singler %in% "TE")
+
+
+# Extract counts from your Seurat object
+counts_mx <- GetAssayData(seurat_cells, assay = "RNA", layer = "counts")
+
+# Build metadata — only required columns needed
+# Add any extra columns you want but cell_name and cell_type are mandatory
+metadata <- data.frame(
+  cell_name = colnames(seurat_cells),
+  cell_type = seurat_cells$predicted_celltype_singler,
+  stringsAsFactors = FALSE
+)
+
+
+# =============================================================================
+# STEP 2 — Create inferCNV objects
+# =============================================================================
+# Extract embryo (everything except the last dot and cell number)
+metadata$embryo <- sub("^(.+)\\.[0-9]+$", "\\1", metadata$cell_name)
+
+# Extract stage (first part before the first dot)
+metadata$stage <- sub("^([^\\.]+)\\..*$", "\\1", metadata$cell_name)
+
+
+obj_list <- make_infercnv_objects(
+  counts_mx       = counts_mx,
+  metadata        = metadata,
+  cell_type_col   = "cell_type",              # column name in your metadata
+  gene_order_file = "~/VUB/InferCNV/InferCNV_RScripts/hg38_gencode_v27.txt",
+  mode            = "within",                  
+  chr_exclude     = c("MT", "Y"),
+  min_max_counts  = c(100, 1e6),
+  n_splits_within = 3
+)
+
+
+
 ############################################################################### -
 ############### Initial Processing of InferCNV Calls ##########################
 ############################################################################### -
@@ -36,10 +77,11 @@ infer_objs <- load_and_prepare_infercnv_reference(infer_objs_1)
 
 
 final_data <- run_fast_cnv_pipeline(infer_objs,max_gap = 100000,
-                                    min_ovelap_consistent_calls = 0.75,
+                                    min_overlap_consistent_calls = 0.75,
                                     min_overlap_multiple_nodes = 0.6,
                                     min_references = 2,
-                                    removed_log_retur = T)
+                                    removed_log_retur = T,
+                                    metadata = )
 
 
 ############################################################################### -
@@ -150,7 +192,15 @@ plot_all_cnv_distributions(supported_events,c(5, 25, 50))
 ################################################################################ -
 
 library(readr)
+library(dplyr)
 load("C:/Users/pmgra/Documents/VUB/InferCNV/chromossome_arms.RData")
+
+sp <- chromosome_arms %>%
+  group_split(chr)
+
+
+
+
 
 #Merge cnv_overlap info with the information that we know about the chromossomes
 cnv_total <- add_chromosome_info(supported_events,
@@ -237,38 +287,41 @@ all_events <- cnv_total %>%
 
 
 #Analysis of CNV segment frequency based on the embryo
-clustered_events <- run_cnv_locus_analysis(all_events, by = c("embryo"), overlap_method = "reciprocal", min_ovelap = 0.8, sample_col = "embryo",removed_log_retur = T )
+clustered_events <- run_cnv_locus_analysis(all_events, by = c("embryo", "cnv_State"), overlap_method = "reciprocal", min_ovelap = 0.8, sample_col = "embryo",removed_log_retur = T )
 
 #Number of cells detected per embryo
 
 n <- lapply(unique(cnv_total$embryo), function(embryo){
-  data.frame(cell_type = embryo, n_total_cells = sum(grepl(embryo,colnames(seurat_obj))))
+  data.frame(embryo = embryo, n_total_cells = sum(grepl(embryo,colnames(seurat_obj))))
 })
 celltype_sizes <- do.call(rbind,n)
 
 
-min_thr <- resolve_celltype_thresholds(
-  celltype_sizes,
-  method = "fraction",
-  fraction = 0.05,
-  min_threshold = 2,
-  max_threshold = Inf
-)
 
-high_thr <- min_thr
-colnames(high_thr)[colnames(high_thr) == "min_cells_keep"] <- "high_min_cells"
-colnames(high_thr)[colnames(high_thr) == "cell_type"] <- "embryo"
-colnames(min_thr)[colnames(min_thr) == "cell_type"] <- "embryo"
-
-
-res_scores <- score_cnv_clusters(
-  clustered_events$cnv_locus_summary,
-  clustered_events$clustered_events,
-  min_threshold_df = min_thr,
-  by_union = "embryo",
-  high_threshold_df = high_thr,
-  threshold_group_col = "embryo",
-  min_length_mb = 25
+clustered_events$clustered_events <- clustered_events$clustered_events |>
+  group_by(cnv_equiv_id) |>
+  mutate(start = min(start),
+         end = max(end),
+         cnv_length = end - start,
+         cnv_length_mb = cnv_length / 1e6) |>
+  ungroup()
+  
+res_scores_new <- score_cnv_clusters(
+    summary_df = clustered_events$cnv_locus_summary,
+    clustered_events = clustered_events$clustered_events,
+    cell_sizes = celltype_sizes,
+    by_union             = "embryo",
+    boundaries_mb        = c(25, 10),
+    base_fraction        = 0.05,
+    step                 = 0.05,
+    fractions            = NULL,
+    threshold_method     = "auto",
+    threshold_mode       = "fractions",
+    min_cap_threshold    = 2L,
+    max_cap_threshold    = 25L,
+    max_tiers            = 2L,
+    total_chromosome_permission = 65,
+    round_fun = ceiling
 )
 
 
@@ -282,8 +335,8 @@ summary_info <- make_embryo_stage_summary(cnv_filtered, seurat_obj)
 
 library(dplyr)
 
-cnv_filtered<- res_scores %>%
-  filter(confidence == "high")
+cnv_filtered<- res_scores_new %>%
+  filter(confidence == "High")
 #cnv_filtered_new <- cnv_filtered
 
 # 1. Prepare genome (once per hg38)
@@ -297,79 +350,26 @@ cnv_mapped <- map_cnv_to_genome(
   threshold = 75
 )
 
-cnv_mapped <- cnv_mapped %>%
-  arrange(embryo, chr) %>%
-  mutate(plot_idx = row_number(), cell_type = factor(cell_type), embryo = factor(embryo), chr = factor(chr))
 
-#Separation of CNV segments based on the embryo - Potential Embryo-based patterns are displayed
-dataset_boundaries <- cnv_mapped %>%
-  group_by(embryo) %>%
-  summarise(max_idx = max(plot_idx), .groups = "drop")
-
-boundary_lines <- head(dataset_boundaries$max_idx + 0.5, -1)
-
-
-# 5. Plot
-ideogram_plot <- plot_ideogram(genome_structure,
-                               dim(cnv_filtered)[1],
-                               arm_colors = c("p"="#4DBBD5",
-                                              "cen"="black",
-                                              "q"="#E64B35")) 
-
-heatmap_plot <- plot_cnv_heatmap(
+heatmap_plot <- prepare_cnv_plot(
   cnv_mapped,
-  genome_structure$chromosome_lengths,
-  boundary_lines = boundary_lines,
-  show_x_labels = T
-)
+  genome_structure,
+  grouping_cols = c("cell_type", "embryo"),
+  state_colors  = c(
+    "gain" = "#E64B35",
+    "loss" = "royalblue4"))
 
 
-#ggsave(filename="heat_FWO.jpeg",plot = combined_plot, width = 22, height = 10 ,units = "cm",dpi = 300)
-#install.packages("gridExtra")
-library(gridExtra)
-
-
-combined_plot <- assemble_heatmap_with_ideogram(heatmap_plot,
-                                                ideogram_plot,
-                                                cnv_mapped)
-
-legend_cnv <- cowplot::get_legend(
-  heatmap_plot + theme(legend.position = "right")
-)
-
-legend_arms <- cowplot::get_legend(
-  ideogram_plot + theme(legend.position = "right")
-)
-
-
-legend_combined <- plot_grid(
-  legend_cnv,
-  legend_arms,
-  ncol = 1,
-  align = "v"
-)
-
-final_grob <- arrangeGrob(
-  combined_plot,
-  legend_combined,
-  ncol = 2,
-  widths = c(0.9, 0.1) #for the heatmap to have more space than the legends which makes sense
-)
-
-library(grid)
-grid.newpage()
-grid.draw(
-  final_grob 
-)
-
-
-#ggsave(
-#  filename = "C:/Users/pmgra/Documents/VUB/InferCNV/Petropoulous__2016/CNV_final_figure_Petropoulos2016.pdf",
-#  plot = final_grob,
-#  width = 14,
-#  height = 10,
-#  dpi = 300
-#)
+plot_cnv_karyotype(
+  heatmap_plot,
+  genome_structure,
+  ideogram_ratio  = 0.05,
+  arm_colors      = c(
+    "p"   = "paleturquoise4",
+    "cen" = "black",
+    "q"   = "red4"
+  ),
+  show_legend     = TRUE)
 
 ######################################################################################### -
 ################################## GSEA Analysis ########################################

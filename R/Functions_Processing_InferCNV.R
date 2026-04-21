@@ -79,7 +79,6 @@ invisible(lapply(all_packages, function(pkg) {
 discover_infercnv_runs <- function(base_dir = NULL,
                                    ref_dirs,
                                    pattern = "^run\\.final") {
-  
   ref_paths <- if (!is.null(base_dir)) file.path(base_dir, ref_dirs) else ref_dirs
   names(ref_paths) <- ref_dirs
   
@@ -92,6 +91,137 @@ discover_infercnv_runs <- function(base_dir = NULL,
   
 }
 
+
+load_infercnv_data <- function(base_dir, ref_dirs, pattern = "^run\\.final") {
+  
+  # Discover and load runs — already written as discover_infercnv_runs()
+  infer_objs <- discover_infercnv_runs(
+    base_dir = base_dir,
+    ref_dirs = ref_dirs,
+    pattern  = pattern
+  )
+  
+  # Convert to standard schema — already written
+  infer_objs_1 <- lapply(infer_objs, function(x) {
+    list(x@expr.data, x@gene_order)
+  })
+  
+  load_and_prepare_infercnv_reference(infer_objs_1)
+}
+
+
+load_tool_data <- function(
+    tool    = c("infercnv", "scevan", "copykat"),
+    base_dir,
+    ref_dirs,
+    pattern
+) {
+  tool <- match.arg(tool)
+  
+  switch(tool,
+         "infercnv" = load_infercnv_data(base_dir, ref_dirs, pattern)#,
+         #"scevan"   = load_scevan_data(base_dir, ref_dirs, pattern),
+         #"copykat"  = load_copykat_data(base_dir, ref_dirs, pattern)
+  )
+  
+}
+
+
+process_tool_cnv_runs <- function(
+    base_dir,
+    modes                                = c("within", "across"),
+    tool                                 = "infercnv",
+    pattern                              = "^run\\.final",
+    max_gap                              = 100000,
+    min_overlap_consistent_calls         = 0.75,
+    min_overlap_multiple_nodes           = 0.6,
+    filter_seq_mb_init                  = 5,
+    filter_seq_mb_equiv                  = 7,
+    min_references                       = 2,
+    overlap_method_equiv_cnv_call_merge  = "reciprocal",
+    overlap_method_equiv_cnv_after_filter = "reciprocal",
+    parallel                             = FALSE,
+    cores                                = 1L,
+    clique_mode_consistent               = "connected",
+    removed_log_return                   = FALSE,
+    metadata
+) {
+  
+  # ---- Validate base_dir --------------------------------------------------
+  if (!dir.exists(base_dir)) {
+    stop("base_dir does not exist: ", base_dir)
+  }
+  
+  # ---- Validate modes directories exist -----------------------------------
+  missing_mode_dirs <- modes[!dir.exists(file.path(base_dir, modes))]
+  if (length(missing_mode_dirs) > 0L) {
+    stop(
+      "Mode directories not found in base_dir: ",
+      paste(missing_mode_dirs, collapse = ", ")
+    )
+  }
+  
+  # ---- Run pipeline per mode and cell type --------------------------------
+  results <- purrr::map(modes, \(mode) {
+    
+    cell_dir   <- file.path(base_dir, mode)
+    cell_types <- list.files(cell_dir)
+    
+    if (length(cell_types) == 0L) {
+      warning(sprintf("No cell types found in %s — skipping mode '%s'.", 
+                      cell_dir, mode))
+      return(NULL)
+    }
+    
+    ct_results <- purrr::map(cell_types, \(ct) {
+    
+      ct_dir   <- file.path(cell_dir, ct)
+      refs_dir <- list.files(ct_dir, full.names = T)
+      refs_dir <- list.files(ct_dir)[dir.exists(file.path(refs_dir))]
+
+      if (length(refs_dir) == 0L) {
+        warning(sprintf("No reference directories found in %s — skipping.", ct_dir))
+        return(NULL)
+      }
+      
+      message(sprintf("Processing mode='%s', cell_type='%s', refs=%s",
+                      mode, ct, paste(refs_dir, collapse = ", ")))
+      
+      # Load tool data
+      tools_data <- load_tool_data(
+        tool     = tool,
+        base_dir = ct_dir,
+        ref_dirs = refs_dir,
+        pattern  = pattern
+      )
+      
+      # Run CNV pipeline
+      run_fast_cnv_pipeline(
+        gene_level_df                         = tools_data,
+        max_gap                               = max_gap,
+        min_overlap_consistent_calls          = min_overlap_consistent_calls,
+        min_overlap_multiple_nodes            = min_overlap_multiple_nodes,
+        filter_seq_mb_init                    =  filter_seq_mb_init,
+        filter_seq_mb_equiv                   = filter_seq_mb_equiv,
+        min_references                        = min_references,
+        overlap_method_equiv_cnv_call_merge   = overlap_method_equiv_cnv_call_merge,
+        overlap_method_equiv_cnv_after_filter = overlap_method_equiv_cnv_after_filter,
+        parallel                              = parallel,
+        cores                                 = cores,
+        clique_mode_consistent                = clique_mode_consistent,
+        removed_log_return                    = removed_log_return,
+        metadata = metadata,
+        mode = mode
+      )
+    })
+    
+    names(ct_results) <- cell_types
+    ct_results
+  })
+  
+  names(results) <- modes
+  results
+}
 
 #' Convert a wide expression matrix to long format
 #'
@@ -158,6 +288,35 @@ attach_gene_order <- function(long_df, gene_order) {
   merged
 }
 
+
+
+#' Add mode and cell type metadata to pipeline output tables
+#'
+#' Iterates over a nested results list (mode → cell_type → tables)
+#' and adds mode and cell_type columns to each output dataframe.
+#' Uses imap to access names at each level — two levels deep matching
+#' the results list structure.
+#'
+#' @param results Nested list output of run_single_tool_pipeline.
+#' @param mode_col Name of the mode column to add. Default "mode".
+#'
+#' @return Same nested list structure with metadata columns added to
+#'   all dataframe elements.
+add_metadata <- function(
+    df,
+    mode_name      = "within",
+    metadata
+) {
+  
+  difference <- setdiff(df$cell_name, metadata$cell_name)
+  
+  if(length(difference) > 0){
+    stop("you should not have empty cell type values. It will disrupt the clustering analysis later on")
+  }
+  df |> dplyr::mutate(
+            mode = mode_name
+            ) |> left_join(metadata, by = "cell_name")
+      }
 
 #' Discretize raw CNV scores into gain, loss, or neutral states
 #' 
@@ -228,6 +387,18 @@ load_and_prepare_infercnv_reference <- function(infercnv_list) {
 
 
 
+to_gr <- function(df, prefix){
+  stopifnot(all(c("chr","start","end","cell_name","cnv_state") %in% colnames(df)))
+  GRanges(
+    seqnames = df$chr,
+    ranges   = IRanges(start = df$start, end = df$end),
+    row_id   = seq_len(nrow(df)),
+    cell_name = df$cell_name,
+    cnv_state = df$cnv_state,
+    prefix    = prefix
+  )
+}
+
 
 #' Collapse consecutive gene-level CNV calls into segments
 #'
@@ -292,6 +463,114 @@ collapse_genes_to_cnv_segments <- function(gene_cnv_df) {
 }
 
 
+filt_remove_refs_cells <- function(df, metadata, filter_seq_mb, mode) {
+  
+  # ---- Pre-filter ---------------------------------------------------------
+  n_input <- nrow(df)
+  
+  df <- df |>
+    dplyr::arrange(reference, cell_name, chr, state, start) |>
+    dplyr::mutate(
+      cnv_length    = as.numeric(stop) - as.numeric(start) + 1,
+      cnv_length_mb = cnv_length / 1e6
+    ) |>
+    dplyr::filter(cnv_length_mb > filter_seq_mb)
+  
+  n_postfilter <- nrow(df)
+  
+  message(sprintf(paste0(
+    "Length filter (> %.0f Mb):\n",
+    "  Input segments:    %d\n",
+    "  Retained:          %d\n",
+    "  Removed:           %d (%.1f%%)"
+  ),
+  filter_seq_mb,
+  n_input,
+  n_postfilter,
+  n_input - n_postfilter,
+  100 * (n_input - n_postfilter) / n_input
+  ))
+  
+  # ---- Join metadata ------------------------------------------------------
+  df_joined <- df |>
+    dplyr::left_join(metadata, by = "cell_name")
+  
+  unmatched <- sum(is.na(df_joined$reference))
+  if (unmatched > 0L) {
+    warning(sprintf(
+      "%d cell_name(s) did not match metadata — these cells have no group assignment.\n  Unmatched: %s",
+      unmatched,
+      paste(df$cell_name[is.na(df_joined$reference)], collapse = ", ")
+    ))
+  }
+  
+  # ---- Remove reference cells ---------------------------------------------
+  # In within mode: cells from the same group as the reference are removed
+  #   — comparing a group against itself inflates similarity
+  # In across mode: cells whose cell type IS the reference are removed
+  #   — a cell type cannot serve as its own reference
+  
+  n_before_ref_removal <- nrow(df_joined)
+  
+  if (mode == "within") {
+    
+    df_joined <- df_joined |>
+      dplyr::filter(!(reference == split_group)) |>
+      dplyr::select(-dplyr::any_of("split_group"))
+    
+    message(sprintf(paste0(
+      "Reference removal (mode = within):\n",
+      "  Removing cells belonging to the same group as their reference\n",
+      "  Before: %d segments\n",
+      "  After:  %d segments\n",
+      "  Removed: %d segments (self-reference cells)"
+    ),
+    n_before_ref_removal,
+    nrow(df_joined),
+    n_before_ref_removal - nrow(df_joined)
+    ))
+    
+  } else if (mode == "across") {
+    
+    df_joined <- df_joined |>
+      dplyr::filter(!(reference == cell_type)) |>
+      dplyr::select(-dplyr::any_of("split_group"))
+    
+    message(sprintf(paste0(
+      "Reference removal (mode = across):\n",
+      "  Removing cells where their cell type is the reference\n",
+      "  — a cell type cannot be compared against itself\n",
+      "  Before: %d segments\n",
+      "  After:  %d segments\n",
+      "  Removed: %d segments (same cell type as reference)"
+    ),
+    n_before_ref_removal,
+    nrow(df_joined),
+    n_before_ref_removal - nrow(df_joined)
+    ))
+  }
+  
+  # ---- Final check --------------------------------------------------------
+  if (nrow(df_joined) == 0L) {
+    stop(sprintf(
+      "No segments remaining after reference removal in mode = '%s'.\n",
+      "  Check that reference labels in df match group labels in metadata.",
+      mode
+    ))
+  }
+  
+  message(sprintf(paste0(
+    "Pipeline ready:\n",
+    "Total of %d segments retained\n",
+    "In %d cells\n",
+    "mode = '%s'"),
+    nrow(df_joined),
+    dplyr::n_distinct(df_joined$cell_name),
+    mode
+  ))
+  
+  df_joined
+}
 
 #' Merge nearby CNV segments
 #'
@@ -303,7 +582,7 @@ collapse_genes_to_cnv_segments <- function(gene_cnv_df) {
 #'   Default is 100000.
 #'
 #' @return A data frame of merged CNV regions.
-merge_nearby_regions <- function(df, max_gap = 100000, filter_seq_mb = 5, debug = FALSE) {
+merge_nearby_regions <- function(df, max_gap = 100000L, debug = FALSE) {
   # ---- Input validation ---------------------------------------------------
   required <- c("reference", "cell_name", "chr", "state", "start", "stop")
   if (!all(required %in% colnames(df))) {
@@ -318,24 +597,8 @@ merge_nearby_regions <- function(df, max_gap = 100000, filter_seq_mb = 5, debug 
     stop("Null values detected in CNV table")
   }
   
-  n_input <- nrow(df)
-  
-  # ---- Pre-filter ---------------------------------------------------------
-  df <- df |>
-    arrange(reference, cell_name, chr, state, start) %>%
-    mutate(cnv_length = as.numeric(stop) - as.numeric(start) + 1,
-           cnv_length_mb = cnv_length / 1e6) %>%
-    filter(cnv_length_mb > filter_seq_mb)
-  
+
   n_postfilter <- nrow(df)
-  
-  message(sprintf(
-    "A total of %d initial rows →  retained %d with length > %.0f Mb",
-    n_input,
-    n_postfilter,
-    filter_seq_mb
-  ))
-  
   # ---- Core merging logic -------------------------------------------------
   merged_df <- df %>%
     group_by(reference, cell_name, chr, state) %>%
@@ -352,7 +615,6 @@ merge_nearby_regions <- function(df, max_gap = 100000, filter_seq_mb = 5, debug 
       n_segments = n(),
       .groups    = "drop"
     ) %>%
-    # Rename state → cnv_state here — single clean rename, no duplicate columns
     dplyr::rename(cnv_state = state) %>%
     dplyr::select(-merge_id) %>%
     dplyr::arrange(reference, cell_name, chr, cnv_state, start)
@@ -363,7 +625,7 @@ merge_nearby_regions <- function(df, max_gap = 100000, filter_seq_mb = 5, debug 
   # Check 1: merge summary reporting
   message(sprintf(paste0(
     "Merge summary:\n",
-    "  Input (post pre-filter):  %d rows\n",
+    "  Input:                    %d rows\n",
     "  After merging:            %d rows\n",
     "  Reduction:                %d rows (%.1f%%)"
   ),
@@ -374,14 +636,12 @@ merge_nearby_regions <- function(df, max_gap = 100000, filter_seq_mb = 5, debug 
   ))
   
   # Check 2: warn if merging produced no reduction
-  # Not an error — valid if all segments are already well separated
-  if (n_merged == n_postfilter) {
-    warning(sprintf(
-      "No reduction after merging: before = %d, after = %d. ",
-      "max_gap = %d may be too small for this dataset.",
-      n_postfilter, n_merged, max_gap
-    ))
-  }
+  warning(sprintf(
+    "No reduction after merging: before = %d, after = %d. using the max_gap = %d.",
+    as.integer(n_postfilter),
+    as.integer(n_merged),
+    as.integer(max_gap)
+  ))
   
   # Check 3: empty output guard
   if (n_merged == 0L) {
@@ -423,7 +683,7 @@ merge_nearby_regions <- function(df, max_gap = 100000, filter_seq_mb = 5, debug 
     }
     message("Debug: no overlapping segments detected after merging.")
   }
-  
+ 
   merged_df
 }
 
@@ -570,7 +830,7 @@ find_maximal_cliches <- function(q_pass, s_pass, grp){
   if (length(connected_idx) + n_duplicated != nrow(dplyr::bind_rows(group_output))) {
     rows_groups<-  nrow(dplyr::bind_rows(group_output))
     stop(sprintf(
-      "DETAIL that somethings is WRONG. Check this numbers they should add up!  
+      "Somethings is WRONG. Check this numbers they should add up!  
        connected=%d, isolated=%d, n_duplicated=%d, group_output_rows=%d",
       length(connected_idx),
       length(isolated_idx),
@@ -585,7 +845,7 @@ find_maximal_cliches <- function(q_pass, s_pass, grp){
 
 
 
-process_cnv_cluster <- function(grp,overlap_method,min_ovelap){
+process_cnv_cluster <- function(grp,overlap_method,min_overlap){
   n   <- nrow(grp)
 
   # Single-segment group — trivially its own equivalence class
@@ -624,7 +884,7 @@ process_cnv_cluster <- function(grp,overlap_method,min_ovelap){
     method  = overlap_method
   )
   
-  passing <- scores >= min_ovelap
+  passing <- scores >= min_overlap
   q_pass  <- q_idx[passing]
   s_pass  <- s_idx[passing]
   
@@ -649,7 +909,7 @@ process_cnv_cluster <- function(grp,overlap_method,min_ovelap){
 
 assign_cnv_equivalence <- function(
     df,
-    min_ovelap = 0.5,
+    min_overlap = 0.5,
     overlap_method         = "reciprocal",
     filter_seq_mb          = 7,
     parallel               = FALSE,
@@ -671,7 +931,6 @@ assign_cnv_equivalence <- function(
   cnv_missing_collumns <- setdiff(c("cnv_length_mb","cnv_length"), colnames(df))
   if(length(cnv_missing_collumns) > 0L){
     df <- df |>
-      dplyr::arrange(cell_name, chr, cnv_state, start) |>
       dplyr::mutate(
         cnv_length    = end - start + 1L,
         cnv_length_mb = cnv_length / 1e6
@@ -687,8 +946,12 @@ assign_cnv_equivalence <- function(
     n_rows_postfilter <- nrow(df)
     n_rows_removed    <- n_rows_input - n_rows_postfilter
     
-    message(sprintf(
-      "Pre-filter: %d input rows → %d retained (%.1f%% removed) with length > %.0f Mb",
+    message(sprintf(paste0(
+      "Pre-filter:\n", 
+      "%d input rows\n",
+      "%d retained\n", 
+      "%.1f%% removed\n",
+      "Segments length > %.0f Mb"),
       n_rows_input,
       n_rows_postfilter,
       100 * n_rows_removed / n_rows_input,
@@ -723,7 +986,7 @@ assign_cnv_equivalence <- function(
       group_indices,
       process_cnv_cluster,
       overlap_method         = overlap_method,
-      min_ovelap = min_ovelap,
+      min_overlap = min_overlap,
       BPPARAM = BiocParallel::MulticoreParam(workers = n_cores)
     )
   } else {
@@ -731,7 +994,7 @@ assign_cnv_equivalence <- function(
       group_indices,
       process_cnv_cluster,
       overlap_method         = overlap_method,
-      min_ovelap = min_ovelap
+      min_overlap = min_overlap
     )
   }
   
@@ -875,6 +1138,8 @@ summarize_cnv_support <- function(df) {
     ) %>%
     filter(!is.na(cnv_equiv_id))
 }
+
+
 
 #' Filter CNV events by reference support
 #'
@@ -1201,38 +1466,44 @@ resolve_shared_cliques <- function(
 #'
 #' @param gene_level_df A gene-level CNV data frame.
 #' @param max_gap Maximum genomic gap allowed when merging nearby segments.
-#' @param min_ovelap Minimum reciprocal overlap for equivalence
+#' @param min_overlap Minimum reciprocal overlap for equivalence
 #'   assignment.
 #' @param min_references Minimum number of references required to keep a CNV.
 #' @param overlap_method Select the overlap method
 run_fast_cnv_pipeline <- function(
     gene_level_df,
     max_gap = 100000,
-    min_ovelap_consistent_calls = 0.5,
+    min_overlap_consistent_calls = 0.5,
     min_overlap_multiple_nodes = 0.6,
-    filter_seq_meb_merge = 5,
-    filter_seq_meb_equiv = 7,
+    filter_seq_mb_init = 5,
+    filter_seq_mb_equiv = 7,
     min_references = 2,
     overlap_method_equiv_cnv_call_merge = "reciprocal",
     overlap_method_equiv_cnv_after_filter = "reciprocal",
     parallel = F,
     cores = 1L,
     clique_mode_consistent = "connected",
-    removed_log_retur = F
+    removed_log_return = F,
+    mode = "within",
+    metadata 
 ) {
   
   message("→ Collapsing genes to segments")
   segments <- collapse_genes_to_cnv_segments(gene_cnv_df = gene_level_df)
- 
+  
+  message("→ Removing reference cells")
+  filt_segments <- filt_remove_refs_cells(segments, metadata, filter_seq_mb = filter_seq_mb_init, mode)
+  
   message("→ Merging nearby CNVs")
-  merged <- merge_nearby_regions(df = segments, max_gap = max_gap, filter_seq_mb = filter_seq_meb_merge)
+  merged <- merge_nearby_regions(df = filt_segments, max_gap = max_gap)
+
  
   message("→ Assigning CNV equivalence")
   equiv <- assign_cnv_equivalence(
     df = merged,
-    min_ovelap = min_ovelap_consistent_calls,
+    min_overlap = min_overlap_consistent_calls,
     overlap_method         = overlap_method_equiv_cnv_call_merge,
-    filter_seq_mb          = filter_seq_meb_equiv,
+    filter_seq_mb          = filter_seq_mb_equiv,
     parallel               = parallel,
     n_cores = cores
   )
@@ -1260,20 +1531,21 @@ run_fast_cnv_pipeline <- function(
     n_cores        = cores
   )
   
-  if(removed_log_retur){
+    
+  if(removed_log_return){
     list(
-      cnvs_per_segment   = table_with_equiv_id, # one row per segment, with equiv IDs - IDs which tells which CNVs overlap each other
-      cnvs_summarized    = cnv_events,          # one row per equiv group, with support counts
-      cnvs_supported     = supported_events,    # filtered to min_references threshold
+      cnvs_per_segment   =  table_with_equiv_id,  # one row per segment, with equiv IDs - IDs which tells which CNVs overlap each other
+      cnvs_summarized    =  cnv_events,      # one row per equiv group, with support counts
+      cnvs_supported     =  supported_events,    # filtered to min_references threshold
       removed_log        = equiv$removed_log,    #segments that were removed for numerous reason
-      cnvs_supported_overlaped = final_consistent_events #segments that are in multiple calls are assess for overlap and if they pass the threshold the segment increases
+      cnvs_supported_overlaped = add_metadata(df = final_consistent_events, mode_name = mode,  metadata =metadata)  #segments that are in multiple calls are assess for overlap and if they pass the threshold the segment increases
     )
   } else{
     list(
-      cnvs_per_segment   = table_with_equiv_id, # one row per segment, with equiv IDs - IDs which tells which CNVs overlap each other
-      cnvs_summarized    = cnv_events,          # one row per equiv group, with support counts
-      cnvs_supported     = supported_events,    # filtered to min_references threshold
-      cnvs_supported_overlaped = final_consistent_events #segments that are in multiple calls are assess for overlap and if they pass the threshold the segment increases
+      cnvs_per_segment   = table_with_equiv_id,  # one row per segment, with equiv IDs - IDs which tells which CNVs overlap each other
+      cnvs_summarized    =  cnv_events,          # one row per equiv group, with support counts
+      cnvs_supported     =  supported_events,    # filtered to min_references threshold
+      cnvs_supported_overlaped = add_metadata(df = final_consistent_events, mode_name = mode,  metadata = metadata)  #segments that are in multiple calls are assess for overlap and if they pass the threshold the segment increases
     )
   }
 
@@ -1535,6 +1807,437 @@ std_events <- function(tbl, dataset, mode){
     mutate(cell_type = dataset, mode = mode,
            ds_cell = paste(cell_type, cell_name, sep="|"))
 }
+
+
+
+compute_cell_sizes <- function(
+    metadata,
+    group_cols,
+    cell_col = "cell_name"
+) {
+  
+  missing_cols <- setdiff(c(group_cols, cell_col), colnames(metadata))
+  if (length(missing_cols) > 0L) {
+    stop("Missing columns in metadata: ", paste(missing_cols, collapse = ", "))
+  }
+  
+  metadata |>
+    dplyr::group_by(dplyr::across(dplyr::all_of(group_cols))) |>
+    dplyr::summarise(
+      n_total_cells = dplyr::n_distinct(.data[[cell_col]]),
+      .groups       = "drop"
+    )
+}
+
+
+run_full_cnv_pipeline <- function(
+    
+  # ---- Entry point -------------------------------------------------------
+  start_from        = c("block1", "block2", "block3", "block4"),
+  precomputed       = list(),
+  save_intermediate = FALSE,
+  outdir            = NULL,
+  
+  # ---- Block 1 -----------------------------------------------------------
+  counts_mx         = NULL,
+  metadata          = NULL,
+  cell_type_col     = "cell_type",
+  gene_order_file   = NULL,
+  modes              = c("both", "within", "across"),
+  chr_exclude       = c("MT", "Y"),
+  min_max_counts    = c(100, 1e6),
+  n_splits_within   = 3,
+  base_outdir       = NULL,
+  cutoff            = 0.1,
+  cluster_by_groups = TRUE,
+  HMM               = FALSE,
+  denoise           = TRUE,
+  analysis_mode     = "subclusters",
+  window_length     = 140,
+  no_plot           = TRUE,
+  resume_if_exists  = TRUE,
+  
+  # ---- Block 2 -----------------------------------------------------------
+  base_dir                              = NULL,
+  tool                                  = "infercnv",
+  pattern                               = "^run\\.final",
+  max_gap                               = 100000,
+  min_overlap_consistent_calls          = 0.75,
+  min_overlap_multiple_nodes            = 0.6,
+  filter_seq_mb_init                    = 5,
+  filter_seq_mb_equiv                   = 7,
+  min_references                        = 2,
+  overlap_method_equiv_cnv_call_merge   = "reciprocal",
+  overlap_method_equiv_cnv_after_filter = "reciprocal",
+  parallel                              = FALSE,
+  cores                                 = 1L,
+  clique_mode_consistent                = "connected",
+  removed_log_return                    = FALSE,
+  
+  # ---- Block 3 -----------------------------------------------------------
+  chromosome_arms   = NULL,
+  group_cols        = NULL,
+  cell_col          = "cell_name",
+  chr_col           = "chr",
+  start_col         = "start",
+  end_col           = "end",
+  
+  # ---- Block 4 -----------------------------------------------------------
+  by                          = NULL,
+  sample_col                  = NULL,
+  overlap_method              = "reciprocal",
+  min_overlap                 = 0.8,
+  boundaries_mb               = c(25, 10),
+  base_fraction               = 0.05,
+  step                        = 0.05,
+  min_cap_threshold           = 5L,
+  max_cap_threshold           = 25L,
+  total_chromosome_permission = 65
+) {
+  
+  start_from <- match.arg(start_from)
+  modes       <- match.arg(modes)
+  
+  # ---- Validate save_intermediate -----------------------------------------
+  if (save_intermediate && is.null(outdir)) {
+    stop("outdir must be provided when save_intermediate = TRUE.")
+  }
+  if (save_intermediate && !dir.exists(outdir)) {
+    message("Creating outdir: ", outdir)
+    dir.create(outdir, recursive = TRUE)
+  }
+  
+  # ---- Determine which blocks to run --------------------------------------
+  valid_blocks  <- c("block1", "block2", "block3", "block4")
+  blocks_to_run <- valid_blocks[
+    which(valid_blocks == start_from):length(valid_blocks)
+  ]
+  
+  if (start_from != "block1"  && length(precomputed) == 0L | start_from != "block2") {
+    stop(
+      "start_from = '", start_from, "' but precomputed is empty.\n",
+      "Provide required inputs in precomputed list."
+    )
+  }
+  
+  # ---- Initialise ---------------------------------------------------------
+  results  <- list(block1 = NULL, block2 = NULL,
+                   block3 = NULL, block4 = NULL)
+  summaries <- list()
+  t_start   <- proc.time()
+  
+  message(sprintf(
+    "=== CNV Pipeline | start_from = %s | tool = %s ===",
+    start_from, tool
+  ))
+  
+  # =========================================================================
+  # BLOCK 1 — inferCNV creation and execution
+  # =========================================================================
+  if ("block1" %in% blocks_to_run) {
+    
+    if (is.null(counts_mx))       stop("counts_mx required for block1.")
+    if (is.null(metadata))        stop("metadata required for block1.")
+    if (is.null(gene_order_file)) stop("gene_order_file required for block1.")
+    if (is.null(base_outdir))     stop("base_outdir required for block1.")
+    
+    message("\n[1/4] Running inferCNV pipeline...")
+    t1 <- proc.time()
+    
+    results$block1 <- run_infercnv_pipeline(
+      counts_mx         = counts_mx,
+      metadata          = metadata,
+      cell_type_col     = cell_type_col,
+      gene_order_file   = gene_order_file,
+      mode              = modes,
+      chr_exclude       = chr_exclude,
+      min_max_counts    = min_max_counts,
+      n_splits_within   = n_splits_within,
+      base_outdir       = base_outdir,
+      cutoff            = cutoff,
+      cluster_by_groups = cluster_by_groups,
+      HMM               = HMM,
+      denoise           = denoise,
+      analysis_mode     = analysis_mode,
+      window_length     = window_length,
+      no_plot           = no_plot,
+      resume_if_exists  = resume_if_exists
+    )
+    
+    # Enrich metadata with split_group if within mode produced it
+    if (!is.null(results$block1$split_metadata)) {
+      metadata <- results$block1$split_metadata
+      message("  metadata enriched with split_group column (within mode).")
+    }
+    
+    # Pass base_outdir as base_dir for block2
+    base_dir <- base_outdir
+    
+    summaries$block1 <- list(runtime_s = (proc.time() - t1)[["elapsed"]])
+    
+    if (save_intermediate) {
+      path <- file.path(outdir, "block1_infercnv.rds")
+      saveRDS(results$block1, path)
+      message("  Saved: ", path)
+    }
+  }
+  
+  # =========================================================================
+  # BLOCK 2 — Load CNV calls and extract supported events
+  # =========================================================================
+  if ("block2" %in% blocks_to_run) {
+    
+    # Re-entry: resolve base_dir from precomputed
+    if (start_from == "block2") {
+      if (is.null(base_dir)) stop("base_dir required for block2.")
+      if (is.null(metadata)) stop("metadata required for block2.")
+    }
+    
+    modes <- if(modes == "both") c("within", "across") else modes
+    
+    message("\n[2/4] Loading and processing CNV calls...")
+    t2 <- proc.time()
+    
+    full_results <- process_tool_cnv_runs(
+      base_dir                              = base_dir,
+      modes                                 = modes,
+      tool                                  = tool,
+      pattern                               = pattern,
+      max_gap                               = max_gap,
+      min_overlap_consistent_calls          = min_overlap_consistent_calls,
+      min_overlap_multiple_nodes            = min_overlap_multiple_nodes,
+      filter_seq_mb_init                    = filter_seq_mb_init,
+      filter_seq_mb_equiv                   = filter_seq_mb_equiv,
+      min_references                        = min_references,
+      overlap_method_equiv_cnv_call_merge   = overlap_method_equiv_cnv_call_merge,
+      overlap_method_equiv_cnv_after_filter = overlap_method_equiv_cnv_after_filter,
+      parallel                              = parallel,
+      cores                                 = cores,
+      clique_mode_consistent                = clique_mode_consistent,
+      removed_log_return                    = removed_log_return,
+      metadata                              = metadata
+    )
+    
+    browser()
+    # Extract supported events — the key output for downstream blocks
+    supported_events <- purrr::map(full_results, \(x) {
+      x[["cnvs_supported_overlaped"]]
+    }) |>
+      purrr::compact() |>
+      dplyr::bind_rows()
+    
+    if (nrow(supported_events) == 0L) {
+      stop("No supported events after block2 — check pipeline parameters.")
+    }
+    
+    results$block2 <- list(
+      supported_events = supported_events,
+      full_results     = full_results
+    )
+    
+    summaries$block2 <- list(
+      n_events  = nrow(supported_events),
+      n_cells   = dplyr::n_distinct(supported_events$cell_name),
+      runtime_s = (proc.time() - t2)[["elapsed"]]
+    )
+    
+    message(sprintf(
+      "  %d supported events across %d cells",
+      summaries$block2$n_events,
+      summaries$block2$n_cells
+    ))
+    
+    if (save_intermediate) {
+      path <- file.path(outdir, "block2_supported_events.rds")
+      saveRDS(supported_events, path)
+      message("  Saved: ", path)
+    }
+  }
+  
+  # =========================================================================
+  # BLOCK 3 — Annotate CNV events + compute cell sizes
+  # =========================================================================
+  if ("block3" %in% blocks_to_run) {
+    
+    if (is.null(chromosome_arms)) stop("chromosome_arms required for block3.")
+    if (is.null(group_cols))      stop("group_cols required for block3.")
+    
+    # Resolve supported_events
+    supported_events <- if (start_from == "block3") {
+      if (!"supported_events" %in% names(precomputed)) {
+        stop(
+          "precomputed$supported_events required when start_from = 'block3'.\n",
+          "Can be a data frame or path to RDS file."
+        )
+      }
+      se <- precomputed$supported_events
+      if (is.character(se)) {
+        if (!file.exists(se)) stop("RDS path not found: ", se)
+        message("  Loading supported_events from: ", se)
+        readRDS(se)
+      } else {
+        se
+      }
+    } else {
+      results$block2$supported_events
+    }
+    
+    if (!is.null(precomputed$metadata)) metadata <- precomputed$metadata
+    if (is.null(metadata)) stop("metadata required for block3.")
+    
+    message("\n[3/4] Annotating CNV events...")
+    t3 <- proc.time()
+    
+    cnv_annotated <- add_chromosome_info(
+      supported_events,
+      chromosome_arms,
+      chr_col   = chr_col,
+      start_col = start_col,
+      end_col   = end_col
+    )
+    
+    cell_sizes <- compute_cell_sizes(
+      metadata   = metadata,
+      group_cols = group_cols,
+      cell_col   = cell_col
+    )
+    
+    results$block3 <- list(
+      cnv_annotated = cnv_annotated,
+      cell_sizes    = cell_sizes
+    )
+    
+    summaries$block3 <- list(
+      n_annotated      = nrow(cnv_annotated),
+      n_groups         = nrow(cell_sizes),
+      cell_size_range  = range(cell_sizes$n_total_cells),
+      runtime_s        = (proc.time() - t3)[["elapsed"]]
+    )
+    
+    message(sprintf(
+      "  %d annotated events | %d groups | cell range: %d-%d",
+      summaries$block3$n_annotated,
+      summaries$block3$n_groups,
+      summaries$block3$cell_size_range[1],
+      summaries$block3$cell_size_range[2]
+    ))
+    
+    if (save_intermediate) {
+      path <- file.path(outdir, "block3_annotated.rds")
+      saveRDS(results$block3, path)
+      message("  Saved: ", path)
+    }
+  }
+  
+  # =========================================================================
+  # BLOCK 4 — Cluster and score CNV loci
+  # =========================================================================
+  if ("block4" %in% blocks_to_run) {
+    
+    # Resolve inputs
+    if (start_from == "block4") {
+      if (!all(c("cnv_annotated", "cell_sizes") %in% names(precomputed))) {
+        stop(
+          "precomputed must contain 'cnv_annotated' and 'cell_sizes' ",
+          "when start_from = 'block4'."
+        )
+      }
+      cnv_annotated <- precomputed$cnv_annotated
+      cell_sizes    <- precomputed$cell_sizes
+    } else {
+      cnv_annotated <- results$block3$cnv_annotated
+      cell_sizes    <- results$block3$cell_sizes
+    }
+    
+    # Default by and sample_col to group_cols if not specified
+    if (is.null(by)) {
+      by <- group_cols
+      message("  by defaulting to group_cols: ",
+              paste(group_cols, collapse = ", "))
+    }
+    if (is.null(sample_col)) {
+      sample_col <- group_cols[1]
+      message("  sample_col defaulting to: ", sample_col)
+    }
+    
+    message("\n[4/4] Clustering and scoring CNV loci...")
+    t4 <- proc.time()
+    
+    clustered_events <- run_cnv_locus_analysis(
+      cnv_annotated,
+      by             = by,
+      overlap_method = overlap_method,
+      min_ovelap     = min_overlap,
+      sample_col     = sample_col,
+      cell_col       = cell_col
+    )
+    
+    scored_events <- score_cnv_clusters(
+      summary_df               = clustered_events$cnv_locus_summary,
+      clustered_events         = clustered_events$clustered_events,
+      cell_sizes               = cell_sizes,
+      by_union                 = sample_col,
+      boundaries_mb            = boundaries_mb,
+      base_fraction            = base_fraction,
+      step                     = step,
+      threshold_method         = "auto",
+      threshold_mode           = "fractions",
+      min_cap_threshold        = min_cap_threshold,
+      max_cap_threshold        = max_cap_threshold,
+      total_chromosome_permission = total_chromosome_permission,
+      round_fun                = ceiling
+    )
+    
+    results$block4 <- list(
+      clustered_events = clustered_events,
+      scored_events    = scored_events
+    )
+    
+    summaries$block4 <- list(
+      n_clustered = nrow(clustered_events$clustered_events),
+      n_scored    = nrow(scored_events),
+      runtime_s   = (proc.time() - t4)[["elapsed"]]
+    )
+    
+    message(sprintf(
+      "  %d clustered events | %d scored loci",
+      summaries$block4$n_clustered,
+      summaries$block4$n_scored
+    ))
+    
+    if (save_intermediate) {
+      path <- file.path(outdir, "block4_clustered_scored.rds")
+      saveRDS(results$block4, path)
+      message("  Saved: ", path)
+    }
+  }
+  
+  # ---- Pipeline summary ---------------------------------------------------
+  total_runtime <- (proc.time() - t_start)[["elapsed"]]
+  
+  message(sprintf(paste0(
+    "\n=== Pipeline complete ===\n",
+    "  Blocks run:    %s\n",
+    "  Total runtime: %.1f seconds (%.1f minutes)"
+  ),
+  paste(blocks_to_run, collapse = " → "),
+  total_runtime,
+  total_runtime / 60
+  ))
+  
+  c(
+    results,
+    list(summary = list(
+      blocks_run    = blocks_to_run,
+      per_block     = summaries,
+      total_runtime = total_runtime
+    ))
+  )
+}
+
+
+
+
 
 
 

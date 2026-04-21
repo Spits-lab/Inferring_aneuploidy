@@ -113,7 +113,7 @@ cluster_cnv_events_by <- function(df, by = NULL, overlap_method = "reciprocal", 
   
   res <- assign_cnv_equivalence(
     df,
-    min_ovelap = min_ovelap,
+    min_overlap = min_ovelap,
     overlap_method         = overlap_method,
     filter_seq_mb          = 0,
     parallel               = parallel,
@@ -156,13 +156,13 @@ summarise_cnv_loci <- function(df, by = NULL,
                                cell_col = "ds_cell",
                                mode_col = "mode") {
   
-  required_cols <- c("cnv_equiv_id", "chr", "cnv_state", "start", "end")
+  required_cols <- c("cnv_equiv_id", "chr", "cnv_state", "start", "end", by)
   missing_cols <- setdiff(required_cols, colnames(df))
   if (length(missing_cols) > 0) {
     stop("Missing required columns: ", paste(missing_cols, collapse = ", "))
   }
   
-  if (!sample_col %in% colnames(df)) {
+  if (!any(by %in% colnames(df))) {
     stop("Missing sample column: ", sample_col)
   }
   
@@ -188,26 +188,6 @@ summarise_cnv_loci <- function(df, by = NULL,
       .groups = "drop"
     )
   
-  # Add mode-specific summaries only if mode exists
-  if (mode_col %in% colnames(df)) {
-    mode_summary <- df %>%
-      dplyr::summarise(
-        n_within = sum(.data[[mode_col]] == "within", na.rm = TRUE),
-        n_across = sum(.data[[mode_col]] == "across", na.rm = TRUE),
-        n_both = sum(.data[[mode_col]] == "both", na.rm = TRUE),
-        cells_within = dplyr::n_distinct(.data[[cell_col]][.data[[mode_col]] == "within"]),
-        cells_across = dplyr::n_distinct(.data[[cell_col]][.data[[mode_col]] == "across"]),
-        cells_both = dplyr::n_distinct(.data[[cell_col]][.data[[mode_col]] == "both"]),
-        samples_within = dplyr::n_distinct(.data[[sample_col]][.data[[mode_col]] == "within"]),
-        samples_across = dplyr::n_distinct(.data[[sample_col]][.data[[mode_col]] == "across"]),
-        samples_both = dplyr::n_distinct(.data[[sample_col]][.data[[mode_col]] == "both"]),
-        .groups = "drop"
-      )
-    
-    out <- out %>%
-      dplyr::left_join(mode_summary, by = grouping_vars)
-  }
-  
   out %>%
     dplyr::arrange(dplyr::desc(n_cells), dplyr::desc(n_events))
 }
@@ -228,7 +208,7 @@ summarise_cnv_loci <- function(df, by = NULL,
 #' * `clustered_events` — CNV events with cluster assignments
 #' * `cnv_locus_summary` — summarised CNV loci
 #'
-run_cnv_locus_analysis <- function(df, by = NULL, min_ovelap = 0.75, sample_col, overlap_method = "reciprocal",
+run_cnv_locus_analysis <- function(df, by = NULL, min_ovelap = 0.75, sample_col, cell_col, overlap_method = "reciprocal",
                                    parallel = F, n_cores = 1L, removed_log_retur = F){
   
   clustered <- cluster_cnv_events_by(
@@ -247,7 +227,8 @@ run_cnv_locus_analysis <- function(df, by = NULL, min_ovelap = 0.75, sample_col,
   summary_tbl <- summarise_cnv_loci(
     df = clustered_table_with_equiv_id,
     by = by,
-    sample_col = sample_col
+    sample_col = sample_col,
+    cell_col = cell_col
   )
   
   
@@ -281,10 +262,12 @@ run_cnv_locus_analysis <- function(df, by = NULL, min_ovelap = 0.75, sample_col,
 #'
 #' @return
 #' Filtered CNV locus data frame.
-filter_cnv_loci_min_cells <- function(df,
-                                      min_cells_keep = 5,
-                                      threshold_df = NULL,
-                                      group_col = NULL) {
+filter_cnv_loci <- function(
+    total_chromosome_permission  = 70,
+    clustered_events = NULL
+) {
+  
+  # ---- Input validation ---------------------------------------------------
   
   required_cols <- c(
     "n_cells",
@@ -293,66 +276,54 @@ filter_cnv_loci_min_cells <- function(df,
     "whole_chromosome_loss"
   )
   
-  missing_cols <- setdiff(required_cols, colnames(df))
+  missing_cols <- setdiff(required_cols, colnames(clustered_events))
   if (length(missing_cols) > 0) {
     stop("Missing required columns: ", paste(missing_cols, collapse = ", "))
   }
   
-  out <- df
+  # ---- Threshold resolution -----------------------------------------------
   
-  # Optional warning if group_col is passed but no threshold table is used
-  if (!is.null(group_col) && is.null(threshold_df)) {
-    warning("group_col was provided but threshold_df is NULL; using global min_cells_keep.")
-  }
+  n_before <- nrow(clustered_events)
+    
+    out <- clustered_events |>
+      dplyr::mutate(
+        max_chr_event = pmax(
+          whole_chromosome_gain,
+          whole_chromosome_loss,
+          na.rm = TRUE
+        ),
+        pass_cells      = case_when(is.na(effective_threshold) ~ F,
+                                    n_cells >= effective_threshold ~ T),
+        pass_centromere = !(arm_class == "p_centromere_q" &
+                              max_chr_event < total_chromosome_permission)
+      ) |>
+      dplyr::filter(pass_cells, pass_centromere) |>
+      dplyr::select(-all_of(c("max_chr_event",
+                       "pass_cells", "pass_centromere", "effective_threshold")))
+    
   
-  # If per-group thresholds are provided, join them
-  if (!is.null(threshold_df)) {
-    
-    if (is.null(group_col)) {
-      stop("group_col must be provided when threshold_df is used.")
-    }
-    
-    if (!group_col %in% colnames(out)) {
-      stop("group_col not found in df: ", group_col)
-    }
-    
-    if (!group_col %in% colnames(threshold_df)) {
-      stop("group_col not found in threshold_df: ", group_col)
-    }
-    
-    if (!"min_cells_keep" %in% colnames(threshold_df)) {
-      stop("threshold_df must contain column `min_cells_keep`.")
-    }
-    
-    # Avoid duplicated min_cells_keep column if function is reused
-    if ("min_cells_keep" %in% colnames(out)) {
-      out <- out %>% dplyr::select(-min_cells_keep)
-    }
-    
-    out <- out %>%
-      dplyr::left_join(
-        threshold_df %>%
-          dplyr::select(dplyr::all_of(group_col), min_cells_keep),
-        by = group_col
-      )
-    
-    if (any(is.na(out$min_cells_keep))) {
-      stop("Some rows have no min_cells_keep after joining threshold_df.")
-    }
-    
-  } else {
-    # Global threshold
-    out <- out %>%
-      dplyr::mutate(min_cells_keep = min_cells_keep)
-  }
+  # ---- Reporting ----------------------------------------------------------
+  n_after         <- nrow(out)
+  n_removed_cells <- length(unique(clustered_events["cell_name"])) - length(unique(out["cell_name"]))
   
-  out %>%
-    dplyr::filter(
-      n_cells >= min_cells_keep,
-      !(arm_class == "p_centromere_q" &
-          pmax(whole_chromosome_gain, whole_chromosome_loss, na.rm = TRUE) < 70)
-    )
+  message(sprintf(paste0(
+    "Cell filter summary:\n",
+    "  Input:                    %d rows\n",
+    "  Retained:                 %d rows\n",
+    "  Removed (total):          %d rows (%.1f%%)\n",
+    "  Centromere threshold:     %.0f%%"
+  ),
+  n_before,
+  n_after,
+  n_before - n_after,
+  100 * (n_before - n_after) / n_before,
+  total_chromosome_permission
+  ))
+  
+  return(out)
 }
+
+
 
 #' Assign confidence levels to CNV clusters
 #'
@@ -375,94 +346,222 @@ filter_cnv_loci_min_cells <- function(df,
 #' * `pass_cells`
 #' * `pass_length`
 #' * `low_reason`
-assign_cluster_confidence_binary <- function(
-    summary_df,
-    high_min_cells = 5,
-    high_threshold_df = NULL,
-    group_col = NULL,
-    min_length_mb = 10,
-    length_col = c("cnv_length_mb", "locus_width_mb"),
-    keep_low = TRUE
+classify_cnv_loci <- function(
+    df
 ){
+  df <- df %>% dplyr::mutate( tier = as.numeric(gsub("^tier_","",tier )),
+    confidence = case_when(tier == 1 ~ "High", tier == 2 ~ "Low"))
+  return(df)
+}
+
+
+make_tier_definitions <- function(
+    n_tiers       = 2,
+    base_fraction = 0.05,
+    step          = 0.03,
+    min_size_mb   = c(25),
+    fractions     = NULL,
+    n_cells       = NULL,
+    mode          = c("fractions", "number")
+) {
   
-  length_col <- match.arg(length_col)
+  mode <- match.arg(mode)
   
-  req_cols <- c("n_cells", length_col)
-  missing_cols <- setdiff(req_cols, colnames(summary_df))
-  if (length(missing_cols) > 0) {
-    stop("Missing required columns in summary_df: ", paste(missing_cols, collapse = ", "))
+  # ---- Validate n_tiers ---------------------------------------------------
+  if (n_tiers == 1L) {
+    message("Note: single tier — all CNVs use the same threshold.")
   }
   
-  out <- summary_df
-  
-  
-  
-  if (!is.null(high_threshold_df)) {
-    if (is.null(group_col)) {
-      stop("group_col must be provided when high_threshold_df is used")
+  # ---- Validate min_size_mb -----------------------------------------------
+  if (length(min_size_mb) != n_tiers) {
+    stop(sprintf(
+      "min_size_mb must have exactly %d values — one per tier. Got %d.",
+      n_tiers, length(min_size_mb)
+    ))
+  }
+  if (n_tiers > 1L && !all(diff(min_size_mb) < 0)) {
+    stop(
+      "min_size_mb must be strictly decreasing — ",
+      "tier 1 should have the largest minimum size.\n",
+      "  Got: ", paste(min_size_mb, collapse = ", ")
+    )
+  }
+  if (any(min_size_mb < 0)) {
+    stop("min_size_mb values must be non-negative.")
+  }
+  # ---- Fraction resolution ------------------------------------------------
+  if(mode == "fractions"){
+    
+    if (!is.null(n_cells)) {
+      warning("n_cells ignored when selected mode is 'fractions'.")
     }
     
-    if (!group_col %in% colnames(out)) {
-      stop("group_col not found in summary_df: ", group_col)
-    }
+  if (!is.null(fractions)) {
     
-    if (!group_col %in% colnames(high_threshold_df)) {
-      stop("group_col not found in high_threshold_df: ", group_col)
+    # Manual fractions supplied — validate
+    if (length(fractions) != n_tiers) {
+      stop(sprintf(
+        "fractions must have exactly %d values — one per tier. Got %d.",
+        n_tiers, length(fractions)
+      ))
     }
-    
-    if (!"high_min_cells" %in% colnames(high_threshold_df)) {
-      stop("high_threshold_df must contain column `high_min_cells`")
-    }
-    
-  
-    out <- out %>%
-      dplyr::left_join(
-        high_threshold_df %>% dplyr::select(dplyr::all_of(group_col), high_min_cells),
-        by = group_col
+    if (any(fractions <= 0) || any(fractions >= 1)) {
+      stop(
+        "All fractions must be in (0, 1).\n",
+        "  Got: ", paste(round(fractions, 4), collapse = ", ")
       )
+    }
     
-    if (any(is.na(out$high_min_cells))) {
-      stop("Some rows have no high_min_cells after joining high_threshold_df")
+    if (n_tiers > 1L && !all(diff(fractions) > 0)) {
+      stop(
+        "fractions must be strictly increasing — ",
+        "tier 1 (largest CNVs) should have the smallest fraction.\n",
+        "  Got: ", paste(round(fractions, 4), collapse = ", ")
+      )
     }
     
   } else {
-    out <- out %>%
-      dplyr::mutate(high_min_cells = high_min_cells)
-  }
-  
-  out <- out %>%
-    dplyr::mutate(
-      pass_cells = n_cells >= high_min_cells,
-      pass_length = .data[[length_col]] >= min_length_mb,
-      confidence = dplyr::case_when(
-        pass_cells & pass_length ~ "high",
-        TRUE ~ "low"
-      ),
-      low_reason = dplyr::case_when(
-        confidence == "high" ~ NA_character_,
-        !pass_cells ~ "failed_cells",
-        !pass_length ~ "failed_length",
-        TRUE ~ "other"
+    
+    # Auto-generate fractions from base + step
+    fractions <- base_fraction + (0:(n_tiers - 1)) * step
+    
+    if (any(fractions <= 0) || any(fractions >= 1)) {
+      stop(sprintf(
+        "Generated fractions outside (0, 1) — adjust base_fraction or step.\n  Got: %s",
+        paste(round(fractions, 4), collapse = ", ")
+      ))
+    }
+    
+
+  } 
+    out <- data.frame(
+    tier        = paste0("tier_", seq_len(n_tiers)),
+    min_size_mb = min_size_mb,
+    fraction    = fractions,
+    stringsAsFactors = FALSE
+  ) 
+    } else if(mode == "number"){
+    
+    if (!is.null(fractions)) {
+      warning("fractions ignored when mode = 'number'.")
+    }
+    
+    if (is.null(n_cells)) {
+      stop("n_cells must be provided when mode = 'number'.")
+    }
+    
+    n_tier <- length(n_cells)
+    message(sprintf("%d tiers are being created.", n_tier))
+      
+    if (any(n_cells < 1L)) {
+      stop("n_cells values must be >= 1.")
+    }
+    
+    if (n_tiers > 1L && !all(diff(n_cells) > 0)) {
+      stop(
+        "n_cells must be strictly increasing — ",
+        "tier 1 (largest CNVs) should require the fewest cells.\n",
+        "  Got: ", paste(n_cells, collapse = ", ")
       )
+    }
+      
+    out <- data.frame(
+      tier        = paste0("tier_", seq_len(n_tiers)),
+      min_size_mb = min_size_mb,
+      n_cells     = as.integer(n_cells),
+      stringsAsFactors = FALSE
     )
+    
+  }
+
+  # ---- Report -------------------------------------------------------------
+  message(sprintf(
+    "Tier definitions created (%d tiers, mode = '%s'):", n_tiers, mode
+  ))
   
-  if (!keep_low) {
-    out <- out %>% dplyr::filter(confidence == "high")
+  if (mode == "fractions") {
+    message(paste(
+      sprintf("  tier_%d: min_size = %.0f Mb, fraction = %.3f",
+              seq_len(n_tiers), min_size_mb, fractions),
+      collapse = "\n"
+    ))
+  } else {
+    message(paste(
+      sprintf("  tier_%d: min_size = %.0f Mb, n_cells = %d",
+              seq_len(n_tiers), min_size_mb, n_cells),
+      collapse = "\n"
+    ))
   }
   
-  out %>%
-    dplyr::mutate(confidence = factor(confidence, levels = c("high", "low")))
-  
-  
+  out
 }
+
+
+resolve_tier_thresholds <- function(method = c("auto", "single", "manual"),
+                                    n_tiers       = 3,
+                                    base_fraction = 0.05,
+                                    step          = 0.03,
+                                    min_size_mb   = c(100, 50, 20),
+                                    fractions     = NULL,
+                                    n_cells       = NULL,
+                                    mode          = c("fractions", "number")
+                                    
+) {
+  
+  method <- match.arg(method)
+  mode   <- match.arg(mode)
+  
+  # ---- Method dispatch ----------------------------------------------------
+  if (method == "automated") {
+    warning(
+      "Automated method uses fraction-based approach only. ",
+      "For number-based thresholds use method = 'vector' and supply n_cells."
+    )
+    mode     <- "fractions"
+    fractions <- NULL
+    n_cells   <- NULL
+  }
+  
+  if (method == "fixed") {
+    message("Fixed threshold — single tier applied uniformly.")
+    
+    if (!is.null(fractions) && !is.null(n_cells)) {
+      stop("Provide either fractions or n_cells, not both.")
+    }
+    if (is.null(fractions) && is.null(n_cells)) {
+      stop("Provide either a fraction or n_cells value for the fixed threshold.")
+    }
+    
+    mode    <- if (!is.null(fractions)) "fractions" else "number"
+    n_tiers <- 1L
+  }
+  
+  
+  out <- make_tier_definitions(
+    n_tiers       = n_tiers,
+    base_fraction = base_fraction,
+    step          = step,
+    min_size_mb   = min_size_mb,
+    fractions     = fractions,
+    n_cells       = n_cells,
+    mode          = mode
+  )
+  
+  out
+}
+
+
+
+
+
+
+
 
 #' Determine CNV detection thresholds per cell type
 #'
 #' Calculates minimum cell thresholds required to retain CNV loci for
 #' different cell types based on dataset size or user-defined rules.
 #'
-#' @param celltype_sizes Table containing cell types and their total
-#' cell counts.
 #' @param method Threshold calculation strategy.
 #' @param fixed_value Fixed threshold used when `method = "fixed"`.
 #' @param fraction Fraction of total cells used when `method = "fraction"`.
@@ -473,54 +572,45 @@ assign_cluster_confidence_binary <- function(
 #'
 #' @return
 #' Data frame with calculated `min_cells_keep` per cell type. We can use this function for filtering and also produced degree of confidence scores
-resolve_celltype_thresholds <- function(celltype_sizes,
-                                        method = c("fixed", "fraction", "median", "mean", "manual"),
-                                        fixed_value = 5,
-                                        fraction = 0.05,
-                                        manual_thresholds = NULL,
-                                        min_threshold = 3,
-                                        max_threshold = 20,
-                                        round_fun = ceiling) {
+resolve_tier_thresholds <- function(method = c("fixed", "fraction", "manual"),
+                                      n_tiers       = 3,
+                                      base_fraction = 0.05,
+                                      step          = 0.03,
+                                      min_size_mb   = c(100, 50, 20),
+                                      fractions     = NULL,
+                                      fixed_value = 5,
+                                      manual = 5,
+                                      min_threshold = 3,
+                                      max_threshold = 20,
+                                      round_fun = ceiling
+                                    ) {
   
   method <- match.arg(method)
   
-  if (is.vector(celltype_sizes) && !is.null(names(celltype_sizes))) {
-    celltype_sizes <- data.frame(
-      cell_type = names(celltype_sizes),
-      n_total_cells = as.numeric(celltype_sizes),
-      stringsAsFactors = FALSE
-    )
-  }
-  
-  required_cols <- c("cell_type", "n_total_cells")
-  missing_cols <- setdiff(required_cols, colnames(celltype_sizes))
-  if (length(missing_cols) > 0) {
-    stop("Missing required columns in celltype_sizes: ",
-         paste(missing_cols, collapse = ", "))
-  }
-  
-  out <- celltype_sizes
-  
   if (method == "fixed") {
+    tier_matrix <- make_tier_definitions(n_tiers = 1, base_fraction = fixed_value, step = 0.03, min_size_mb = c(0))
     out$min_cells_keep <- fixed_value
     
   } else if (method == "fraction") {
+    
+    tier_matrix <- make_tier_definitions(n_tiers = 3, base_fraction = 0.05, step = 0.03, min_size_mb = c(100, 50, 20))
+    
+    
+    
     raw_thr <- round_fun(out$n_total_cells * fraction)
     out$min_cells_keep <- pmin(max_threshold, pmax(min_threshold, raw_thr))
-    
-  } else if (method == "median") {
-    thr <- round_fun(median(out$n_total_cells, na.rm = TRUE))
-    out$min_cells_keep <- pmin(max_threshold, pmax(min_threshold, thr))
-    
-  } else if (method == "mean") {
-    thr <- round_fun(mean(out$n_total_cells, na.rm = TRUE))
-    out$min_cells_keep <- pmin(max_threshold, pmax(min_threshold, thr))
-    
+  
   } else if (method == "manual") {
-    if (is.null(manual_thresholds)) {
+    
+    if (is.null(user_threshold_sizes) | is.null(user_fractions) ) {
       stop("manual_thresholds must be provided when method = 'manual'")
     }
     
+    tier_n <- length(user_threshold_sizes)
+    
+    tier_matrix <- make_tier_definitions(n_tiers = tier_n, min_size_mb = c(100, 50, 20), fractions = user_threshold_sizes)
+      
+  
     if (is.null(names(manual_thresholds))) {
       stop("manual_thresholds must be a named vector")
     }
@@ -596,13 +686,45 @@ score_cnv_clusters <- function(
       summary_df %>% dplyr::select(dplyr::all_of(join_cols), n_cells),
       by = join_cols
     )
-
-  filtered_df <- filter_cnv_loci_min_cells(
-    df = merged_df,
-    min_cells_keep = min_cells_keep,
-    threshold_df = min_threshold_df,
-    group_col = threshold_group_col
+  
+  merged_df <- prepare_cnv_thresholds(
+    summary_df,
+    clustered_eventss,
+    by_union = "embryo",
+    method = "auto",
+    max_tiers = 2,
+    base_fraction = 0.05,
+    step          = 0.03,
+    cell_sizes = celltype_sizes,
+    boundaries_mb   = c(50, 20),
+    mode          = "fractions",
+    min_cap_threshold = 2,
+    max_cap_threshold = 25,
+    round_fun = ceiling
   )
+  
+  
+  filtered_df <- filter_cnv_loci(
+    total_chromosome_permission  = 70,
+    clustered_events = clustered_events
+  )
+  
+  filtered_df <- 
+    prepare_cnv_thresholds(
+      summary_df,
+      clustered_eventss,
+      by_union = "embryo",
+      method = "auto",
+      max_tiers = 2,
+      base_fraction = 0.05,
+      step          = 0.03,
+      cell_sizes = celltype_sizes,
+      boundaries_mb   = c(50, 20),
+      mode          = "fractions",
+      min_cap_threshold = 2,
+      max_cap_threshold = 25,
+      round_fun = ceiling
+    )
   
   assign_cluster_confidence_binary(
     summary_df = filtered_df,

@@ -170,7 +170,7 @@ process_tool_cnv_runs <- function(
                       cell_dir, mode))
       return(NULL)
   }
-    
+
   ct_results <- purrr::map(cell_types, \(ct) {
     
       ct_dir   <- file.path(cell_dir, ct)
@@ -508,9 +508,9 @@ filt_remove_refs_cells <- function(df, metadata, filter_seq_mb, mode) {
   
   if (mode == "within") {
     
-   # df_joined <- df_joined |>
-    #  dplyr::filter(!(reference == split_group)) |>
-     # dplyr::select(-dplyr::any_of("split_group"))
+    df_joined <- df_joined |>
+      dplyr::filter(!(reference == split_group)) |>
+      dplyr::select(-dplyr::any_of("split_group"))
     
     message(sprintf(paste0(
       "Reference removal (mode = within):\n",

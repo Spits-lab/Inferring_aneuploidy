@@ -45,6 +45,20 @@ source("~/GitHub/Inferring_aneuploidy/R/GSEA.R")
 ############################# Across and Within Cell type Integration Approach##############################
 ############################################################################################################-
 
+
+obj_list <- make_infercnv_objects(
+  counts_mx       = counts_mx,
+  metadata        = metadata,
+  cell_type_col   = "cell_type",              # column name in your metadata
+  gene_order_file = "~/VUB/InferCNV/InferCNV_RScripts/hg38_gencode_v27.txt",
+  mode            = "within",                  
+  chr_exclude     = c("MT", "Y"),
+  min_max_counts  = c(100, 1e6),
+  n_splits_within = 3
+)
+
+metadata <- obj_list$within_cell_type$split_metadata
+
 test_run <- run_full_cnv_pipeline(
   precomputed = "C:/Users/pmgra/Documents/VUB/InferCNV/Edouard/new_data/",
   start_from = "block2",
@@ -101,7 +115,9 @@ test_run <- run_full_cnv_pipeline(
 ) 
 
 
+
 cnv_filtered <- test_run[["block4"]][["scored_events"]]
+
 
 test <- process_tool_cnv_runs(
     base_dir = "C:/Users/pmgra/Documents/VUB/InferCNV/Edouard/new_data/",

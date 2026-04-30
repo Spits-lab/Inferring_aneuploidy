@@ -3,7 +3,7 @@
 # Functions to create inferCNV objects for within and across comparisons
 # =============================================================================
 
-BASE <- "/user/brussel/115/vsc11567/CNV_inference_analysis/new_R_files"
+BASE <- "C:/Users/pmgra/Documents/GitHub/Inferring_aneuploidy/R/"
 
 source(file.path(BASE, "Infercnv_utils.R"))
 

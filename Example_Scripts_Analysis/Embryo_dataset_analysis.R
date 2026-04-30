@@ -18,11 +18,21 @@ source("~/GitHub/Inferring_aneuploidy/R/Score_system.R")
 source("~/GitHub/Inferring_aneuploidy/R/GSVA.R")
 source("~/GitHub/Inferring_aneuploidy/R/GSEA.R")
 
+source("C:/Users/pmgra/Documents/GitHub/Inferring_aneuploidy/R/Infercnv_utils.R")
+source("C:/Users/pmgra/Documents/GitHub/Inferring_aneuploidy/R/Infercnv_run.R")
+source("C:/Users/pmgra/Documents/GitHub/Inferring_aneuploidy/R/Infercnv_make_objects.R")
+
+
+
 load("C:/Users/pmgra/Documents/VUB/InferCNV/chromossome_arms.RData")
+
+#load("C:/Users/pmgra/Documents/VUB/InferCNV/Petropoulous__2016/25022026_Petrokaryotyped_dataset.RData")
+
 load("C:/Users/pmgra/Documents/VUB/InferCNV/Petropoulous__2016/25022026_Petrokaryotyped_dataset.RData")
 
 seu$cell_names <- colnames(seu)
-seurat_cells <- subset(seu, cell_names %in% cell_name)
+
+seurat_cells <- subset(seu, predicted_celltype_singler %in% "TE")
 
 # Extract counts from your Seurat object
 counts_mx <- GetAssayData(seurat_cells, assay = "RNA", layer = "counts")
@@ -61,6 +71,8 @@ obj_list <- make_infercnv_objects(
 )
 
 
+metadata <- obj_list$within_cell_type[["split_metadata"]]
+
 cell_sizes <- compute_cell_sizes(
   metadata,
   group_cols = "embryo",
@@ -79,7 +91,7 @@ test_run <- run_full_cnv_pipeline(
   chr_exclude       = c("MT", "Y"),
   min_max_counts    = c(100, 1e6),
   n_splits_within   = 3,
-  base_outdir       = "C:/Users/pmgra/Documents/VUB/InferCNV/TE_cells_Petroupoulous_02172026",
+  base_outdir       = "C:/Users/pmgra/Documents/VUB/InferCNV/TE_test",
   cutoff            = 0.1,
   cluster_by_groups = TRUE,
   HMM               = FALSE,
@@ -88,7 +100,7 @@ test_run <- run_full_cnv_pipeline(
   window_length     = 140,
   no_plot           = TRUE,
   resume_if_exists  = TRUE,
-  base_dir                              = "C:/Users/pmgra/Documents/VUB/InferCNV/TE_cells_Petroupoulous_02172026",
+  base_dir                              = "C:/Users/pmgra/Documents/VUB/InferCNV/TE_test",
   modes                                 = c("within"),
   tool                                  = "infercnv",
   pattern                               = "^run\\.final",
@@ -117,7 +129,7 @@ test_run <- run_full_cnv_pipeline(
   boundaries_mb               = c(25, 10),
   base_fraction               = 0.05,
   step                        = 0.05,
-  min_cap_threshold           = 5L,
+  min_cap_threshold           = 2L,
   max_cap_threshold           = 25L,
   total_chromosome_permission = 65
 ) 

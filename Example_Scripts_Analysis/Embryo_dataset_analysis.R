@@ -21,9 +21,8 @@ source("~/GitHub/Inferring_aneuploidy/R/GSEA.R")
 load("C:/Users/pmgra/Documents/VUB/InferCNV/chromossome_arms.RData")
 load("C:/Users/pmgra/Documents/VUB/InferCNV/Petropoulous__2016/25022026_Petrokaryotyped_dataset.RData")
 
-
-seurat_cells <- subset(seu, predicted_celltype_singler %in% "TE")
-
+seu$cell_names <- colnames(seu)
+seurat_cells <- subset(seu, cell_names %in% cell_name)
 
 # Extract counts from your Seurat object
 counts_mx <- GetAssayData(seurat_cells, assay = "RNA", layer = "counts")
@@ -38,13 +37,16 @@ metadata <- data.frame(
 
 
 # =============================================================================
-# STEP 2 — Create inferCNV objects
+###  STEP 2 — Create inferCNV objects 
 # =============================================================================
 # Extract embryo (everything except the last dot and cell number)
 metadata$embryo <- sub("^(.+)\\.[0-9]+$", "\\1", metadata$cell_name)
 
 # Extract stage (first part before the first dot)
 metadata$stage <- sub("^([^\\.]+)\\..*$", "\\1", metadata$cell_name)
+
+
+
 
 
 obj_list <- make_infercnv_objects(
@@ -66,6 +68,7 @@ cell_sizes <- compute_cell_sizes(
 )
 
 test_run <- run_full_cnv_pipeline(
+  precomputed = list(1),
   start_from = "block2",
   save_intermediate = T,
   outdir            = "C:/Users/pmgra/Documents/VUB/Experimental_code/test_output/",
@@ -73,7 +76,6 @@ test_run <- run_full_cnv_pipeline(
   metadata          = metadata,
   cell_type_col     = "cell_type",
   gene_order_file   = "~/VUB/InferCNV/InferCNV_RScripts/hg38_gencode_v27.txt",
-  mode              = "within",
   chr_exclude       = c("MT", "Y"),
   min_max_counts    = c(100, 1e6),
   n_splits_within   = 3,
@@ -86,7 +88,7 @@ test_run <- run_full_cnv_pipeline(
   window_length     = 140,
   no_plot           = TRUE,
   resume_if_exists  = TRUE,
-  base_dir                              = NULL,
+  base_dir                              = "C:/Users/pmgra/Documents/VUB/InferCNV/TE_cells_Petroupoulous_02172026",
   modes                                 = c("within"),
   tool                                  = "infercnv",
   pattern                               = "^run\\.final",
@@ -108,7 +110,7 @@ test_run <- run_full_cnv_pipeline(
   chr_col           = "chr",
   start_col         = "start",
   end_col           = "end",
-  by                          = c("embryo", "cnv_State"),
+  by                          = "embryo",
   sample_col                  = "embryo",
   overlap_method              = "reciprocal",
   min_overlap                 = 0.8,
@@ -119,6 +121,44 @@ test_run <- run_full_cnv_pipeline(
   max_cap_threshold           = 25L,
   total_chromosome_permission = 65
 ) 
+
+
+
+# 1. Prepare genome (once per hg38)
+genome_structure <- prepare_genome_structure(chromosome_arms)
+
+cnv_filtered <- test_run$block4$scored_events
+
+# 2. Map to genome
+cnv_mapped <- map_cnv_to_genome(
+  cnv_filtered,
+  genome_structure,
+  threshold = 80,
+  arrange_df_cols = c("embryo")
+)
+
+
+heatmap_plot <- prepare_cnv_plot(
+  cnv_mapped,
+  genome_structure,
+  grouping_cols = c("embryo"),
+  state_colors  = c(
+    "gain" = "#E64B35",
+    "loss" = "royalblue4"))
+
+
+plot_cnv_karyotype(
+  heatmap_plot,
+  genome_structure,
+  ideogram_ratio  = 0.05,
+  arm_colors      = c(
+    "p"   = "paleturquoise4",
+    "cen" = "black",
+    "q"   = "red4"
+  ),
+  show_legend     = TRUE)
+
+
 ############################################################################### -
 ############### Initial Processing of InferCNV Calls ##########################
 ############################################################################### -
@@ -134,13 +174,20 @@ infer_objs_1 <- lapply(infer_objs, function(x){
 
 infer_objs <- load_and_prepare_infercnv_reference(infer_objs_1)
 
+segments <- collapse_genes_to_cnv_segments(gene_cnv_df = infer_objs)
+
+cell_name <- unique(segments$cell_name)
+
+
+final <- data.frame(embryo = colnames(seu),cell_type = seu$predicted_celltype_singler)
+final <- final[final$embryo %in% cell_name, ]
+table(final$cell_type)
 
 final_data <- run_fast_cnv_pipeline(infer_objs,max_gap = 100000,
                                     min_overlap_consistent_calls = 0.75,
                                     min_overlap_multiple_nodes = 0.6,
                                     min_references = 2,
-                                    removed_log_retur = T,
-                                    metadata = )
+                                    removed_log_retur = T)
 
 
 ############################################################################### -

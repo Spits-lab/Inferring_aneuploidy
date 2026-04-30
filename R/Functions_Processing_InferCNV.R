@@ -508,9 +508,9 @@ filt_remove_refs_cells <- function(df, metadata, filter_seq_mb, mode) {
   
   if (mode == "within") {
     
-    df_joined <- df_joined |>
-      dplyr::filter(!(reference == split_group)) |>
-      dplyr::select(-dplyr::any_of("split_group"))
+   # df_joined <- df_joined |>
+    #  dplyr::filter(!(reference == split_group)) |>
+     # dplyr::select(-dplyr::any_of("split_group"))
     
     message(sprintf(paste0(
       "Reference removal (mode = within):\n",
@@ -1907,7 +1907,7 @@ run_full_cnv_pipeline <- function(
     which(valid_blocks == start_from):length(valid_blocks)
   ]
   
-  if (start_from != "block1"  && length(precomputed) == 0L | start_from != "block2") {
+  if (start_from != "block1"  && length(precomputed) == 0L && start_from != "block2") {
     stop(
       "start_from = '", start_from, "' but precomputed is empty.\n",
       "Provide required inputs in precomputed list."
@@ -1958,10 +1958,10 @@ run_full_cnv_pipeline <- function(
       resume_if_exists  = resume_if_exists
     )
     
-    # Enrich metadata with split_group if within mode produced it
-    if (!is.null(results$block1$split_metadata)) {
-      metadata <- results$block1$split_metadata
-      message("  metadata enriched with split_group column (within mode).")
+    
+    if (!is.null(results$block1$metadata)) {
+      metadata <- results$block1$metadata
+      message("metadata enriched with split_group column (within mode).")
     }
     
     # Pass base_outdir as base_dir for block2
@@ -1991,6 +1991,7 @@ run_full_cnv_pipeline <- function(
     
     message("\n[2/4] Loading and processing CNV calls...")
     t2 <- proc.time()
+    
     
     full_results <- process_tool_cnv_runs(
       base_dir                              = base_dir,

@@ -206,12 +206,9 @@ process_tool_cnv_runs <- function(
 
 
 run_full_cnv_pipeline <- function(
-    
-  # ---- Entry point -------------------------------------------------------
   start_from        = c("block1", "block2", "block3", "block4"),
   save_intermediate = FALSE,
   outdir            = NULL,
-  # ---- Block 1 -----------------------------------------------------------
   counts_mx         = NULL,
   metadata          = NULL,
   cell_type_col     = "cell_type",
@@ -228,8 +225,6 @@ run_full_cnv_pipeline <- function(
   window_length     = 140,
   no_plot           = TRUE,
   resume_if_exists  = TRUE,
-  
-  # ---- Block 2 -----------------------------------------------------------
   base_dir                              = NULL,
   tool                                  = "infercnv",
   pattern                               = "^run\\.final",
@@ -244,16 +239,12 @@ run_full_cnv_pipeline <- function(
   clique_mode_consistent                = "connected",
   removed_log_return                    = FALSE,
   supported_events = NULL,
-  
-  # ---- Block 3 -----------------------------------------------------------
   chromosome_arms   = NULL,
   group_cols        = NULL,
   cell_col          = "cell_name",
   chr_col           = "chr",
   start_col         = "start",
   end_col           = "end",
-  
-  # ---- Block 4 -----------------------------------------------------------
   by                          = NULL,
   sample_col                  = NULL,
   overlap_method              = "reciprocal",

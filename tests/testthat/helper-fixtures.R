@@ -1,14 +1,14 @@
 
 
-source("~/GitHub/Inferring_aneuploidy/R/cnv_annotation.R")
-source("~/GitHub/Inferring_aneuploidy/R/cnv_processing.R")
-source("~/GitHub/Inferring_aneuploidy/R/cnv_scoring.R")
-source("~/GitHub/Inferring_aneuploidy/R/gsva_gsea.R")
-source("C:/Users/pmgra/Documents/GitHub/Inferring_aneuploidy/R/infercnv.R")
-source("C:/Users/pmgra/Documents/GitHub/Inferring_aneuploidy/R/pipeline.R")
+source("~/GitHub/cnvscfinder/R/cnv_annotation.R")
+source("~/GitHub/cnvscfinder/R/cnv_processing.R")
+source("~/GitHub/cnvscfinder/R/cnv_scoring.R")
+source("~/GitHub/cnvscfinder/R/gsva_gsea.R")
+source("C:/Users/pmgra/Documents/GitHub/cnvscfinder/R/infercnv.R")
+source("C:/Users/pmgra/Documents/GitHub/cnvscfinder/R/pipeline.R")
 
 
-hg38_chromosome_arms <- readRDS("C:/Users/pmgra/Documents/GitHub/Inferring_aneuploidy/tests/testthat/fixtures/hg38_chromosome_arms.rds")
+hg38_chromosome_arms <- readRDS("C:/Users/pmgra/Documents/GitHub/cnvscfinder/tests/testthat/fixtures/hg38_chromosome_arms.rds")
 
 
 

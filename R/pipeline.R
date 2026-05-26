@@ -145,9 +145,14 @@ process_tool_cnv_runs <- function(
   cell_types <- list.files(cell_dir)
   
   if (length(cell_types) == 0L) {
-    warning(sprintf("No cell types found in %s — skipping mode '%s'.", 
-                    cell_dir, mode))
-    return(NULL)
+    stop(sprintf(
+      paste0(
+        "No cell types found in '%s' for mode '%s'.\n",
+        "Check that inferCNV has been run and results exist:\n",
+        "  %s/{cell_type}/{A,B,C}/run.final.infercnv_obj"
+      ),
+      cell_dir, mode, cell_dir
+    ))
   }
   
   ct_results <- purrr::map(cell_types, \(ct) {
@@ -444,6 +449,19 @@ run_full_cnv_pipeline <- function(
         removed_log_return                    = removed_log_return,
         metadata                              = metadata
       )
+      
+      if (is.null(full_results)) {
+        message("No results returned from process_tool_cnv_runs — block2 returning NULL.")
+        results$block2 <- NULL
+        summaries$block2 <- list(n_events = 0L, n_cells = 0L,
+                                 runtime_s = (proc.time() - t2)[["elapsed"]])
+        return(c(results, list(summary = list(
+          blocks_run    = blocks_to_run,
+          per_block     = summaries,
+          total_runtime = (proc.time() - t_start)[["elapsed"]]
+        ))))
+      }
+    
     }
     
     # ---- Extract supported events — same regardless of path ---------------

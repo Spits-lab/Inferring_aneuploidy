@@ -1,3 +1,6 @@
+
+source("C:/Users/pmgra/Documents/GitHub/cnvscfinder/tests/testthat/helper-fixtures.R")
+source("C:/Users/pmgra/Documents/GitHub/cnvscfinder/R/infercnv.R")
 # tests/testthat/test-infercnv.R
 # Tests for R/infercnv.R — utility functions only
 # run_infercnv_pipeline excluded — too expensive to test with real inferCNV

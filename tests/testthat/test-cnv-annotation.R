@@ -1,5 +1,5 @@
-source("C:/Users/pmgra/Documents/GitHub/Inferring_aneuploidy/tests/testthat/helper-fixtures.R")
-
+source("C:/Users/pmgra/Documents/GitHub/cnvscfinder/tests/testthat/helper-fixtures.R")
+source("C:/Users/pmgra/Documents/GitHub/cnvscfinder/R/cnv_annotation.R")
 
 # ============================================================================
 # overlap_bp

@@ -1,3 +1,6 @@
+source("C:/Users/pmgra/Documents/GitHub/cnvscfinder/tests/testthat/helper-fixtures.R")
+source("C:/Users/pmgra/Documents/GitHub/cnvscfinder/R/pipeline.R")
+
 # tests/testthat/test-pipeline.R
 # Tests for R/pipeline.R
 # Fixtures loaded from helper-fixtures.R
@@ -166,8 +169,10 @@ testthat::test_that("process_tool_cnv_runs: nonexistent base_dir raises error", 
 })
 
 testthat::test_that("process_tool_cnv_runs: missing mode directory raises error", {
-  tmp <- tempdir()
-  # base_dir exists but has no 'within' subdirectory
+  # Use a dedicated subdirectory that definitely has no 'within' folder
+  tmp <- file.path(tempdir(), "test_missing_mode")
+  dir.create(tmp, showWarnings = FALSE)
+  
   testthat::expect_error(
     process_tool_cnv_runs(
       base_dir = tmp,
@@ -176,25 +181,27 @@ testthat::test_that("process_tool_cnv_runs: missing mode directory raises error"
     ),
     "Mode directories not found"
   )
+  
+  # Cleanup
+  unlink(tmp, recursive = TRUE)
 })
 
-testthat::test_that("process_tool_cnv_runs: empty mode directory returns NULL with warning", {
-  tmp      <- tempdir()
+
+testthat::test_that("process_tool_cnv_runs: empty mode directory raises error", {
+  tmp      <- file.path(tempdir(), "test_empty_mode")
   mode_dir <- file.path(tmp, "within")
-  dir.create(mode_dir, showWarnings = FALSE)
+  dir.create(mode_dir, recursive = TRUE, showWarnings = FALSE)
   
-  testthat::expect_warning(
-    out <- process_tool_cnv_runs(
+  testthat::expect_error(
+    process_tool_cnv_runs(
       base_dir = tmp,
       mode     = "within",
       metadata = make_mock_pipeline_metadata()
     ),
     "No cell types found"
   )
-  testthat::expect_null(out)
   
-  # Cleanup
-  unlink(mode_dir, recursive = TRUE)
+  unlink(tmp, recursive = TRUE)
 })
 
 # ============================================================================
@@ -319,27 +326,50 @@ testthat::test_that("run_full_cnv_pipeline: save_intermediate without outdir rai
   )
 })
 
-testthat::test_that("run_full_cnv_pipeline: returns list with block elements", {
-  # Block 2 will fail on empty dir — we only test the return structure
-  # by checking block1 is NULL when starting from block2
-  tmp      <- tempdir()
+testthat::test_that("run_full_cnv_pipeline: returns named list with block elements", {
+  tmp      <- file.path(tempdir(), "test_pipeline_structure")
   mode_dir <- file.path(tmp, "within")
-  dir.create(mode_dir, showWarnings = FALSE)
+  dir.create(mode_dir, recursive = TRUE, showWarnings = FALSE)
   
-  testthat::expect_warning(
-    out <- run_full_cnv_pipeline(
+  # Empty mode directory now raises error — test that block1 is NULL
+  # by checking the error comes from block2 not block1
+  testthat::expect_error(
+    run_full_cnv_pipeline(
       start_from = "block2",
       base_dir   = tmp,
       metadata   = make_mock_pipeline_metadata()
     ),
-    "No cell types found"
+    "No cell types found"  # error from block2, not block1
   )
   
-  testthat::expect_true("block1" %in% names(out))
-  testthat::expect_true("block2" %in% names(out))
-  testthat::expect_null(out$block1)  # skipped
+  unlink(tmp, recursive = TRUE)
+})
+
+
+testthat::test_that("run_full_cnv_pipeline: block1 is NULL when starting from block2", {
+  # When start_from = "block2", block1 should never run
+  # We verify this by checking the error originates in block2
+  # not in block1 (which would say "counts_mx required")
+  tmp      <- file.path(tempdir(), "test_block1_null")
+  mode_dir <- file.path(tmp, "within")
+  dir.create(mode_dir, recursive = TRUE, showWarnings = FALSE)
   
-  unlink(mode_dir, recursive = TRUE)
+  err <- tryCatch(
+    suppressMessages(
+      run_full_cnv_pipeline(
+        start_from = "block2",
+        base_dir   = tmp,
+        metadata   = make_mock_pipeline_metadata()
+      )
+    ),
+    error = function(e) e
+  )
+  
+  # Error should be from block2 (No cell types) not block1 (counts_mx required)
+  testthat::expect_true(grepl("No cell types", err$message))
+  testthat::expect_false(grepl("counts_mx", err$message))
+  
+  unlink(tmp, recursive = TRUE)
 })
 
 testthat::test_that("run_full_cnv_pipeline: blocks_to_run correct for block3 start", {

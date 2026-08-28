@@ -1,4 +1,4 @@
-### Reference-independent single-cell RNA-seq Karyotyping to understand the fate of aneuploid cells across human development
+# Reference-independent single-cell RNA-seq Karyotyping to understand the fate of aneuploid cells across human development
 
 ---
 

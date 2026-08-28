@@ -12,7 +12,7 @@ This requirement presents challenges in systems where:
 - the **reference population may itself be mosaic**
 - experimental designs **lack clear control populations**
 
-Several reference-free approaches have been proposed, but these methods often rely on **stringent thresholds** and typically detect **whole-chromosome events**, limiting their ability to identify **segmental CNVs** and reducing resolution.
+Some reference-free approaches have been proposed, but these methods often rely on **stringent thresholds** and typically detect **whole-chromosome events**, limiting their ability to identify **segmental CNVs** and reducing resolution.
 
 **MEANDER** aims to address these limitations by introducing a **cross-fold reference strategy** for CNV inference.
 

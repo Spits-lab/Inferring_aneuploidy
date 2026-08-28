@@ -4,7 +4,7 @@
 
 # Overview
 
-Chromosomal mosaicism is common in developmental systems. However, most existing **single-cell RNA-seq CNV inference tools rely on predefined diploid reference populations** to detect copy number alterations from gene expression patterns.
+Chromosomal mosaicism is common in developmental systems. However, most existing **single-cell RNA-seq CNV inference tools rely on predefined euploid reference populations** to detect copy number alterations from gene expression patterns.
 
 This requirement presents challenges in systems where:
 

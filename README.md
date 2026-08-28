@@ -1,7 +1,4 @@
-# MEANDER
-### Revealing the mechanisms of aneuploidy-driven cell fate decisions in early human development
-
-This MEANDER work package develops a framework for **reference-independent copy number variation (CNV) inference from single-cell RNA-sequencing data**, being part of a broader research initiative investigating **aneuploidy-driven cellular dynamics during early human development**. 
+### Reference-independent single-cell RNA-seq Karyotyping to understand the fate of aneuploid cells across human development
 
 ---
 
@@ -85,12 +82,12 @@ The repository is shared to ensure **transparency**
 
 # Authors
 
-Pedro Granjo and  Claudia Spits from the VUB - Genetics Reproduction & Development Research Group
+Pedro Granjo from the VUB - Genetics Reproduction & Development Research Group
 
 ---
 
 # Contact
 
 For questions regarding the project or collaboration opportunities:
-Claudia Spits  
-Email: Claudia.Spits@vub.be
+Pedro Granjo 
+Email: pedro.mauritti.granjo@vub.be

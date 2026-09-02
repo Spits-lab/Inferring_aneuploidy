@@ -1,11 +1,11 @@
-#' @title Score_system
+#' @title cnv_processing
 #'
 #' @description
 #' 
 #' Functions that perform further processing from the CNV performing a final filtering and Confidence Score in a Single Tool Approach
 #' 
 #' @author Pedro Granjo
-#' @date 13-03-2026
+#' @date 02-09-2026
 #'
 
 
@@ -136,8 +136,14 @@ collapse_genes_to_cnv_segments <- function(gene_cnv_df) {
                  .(
                    start = min(start),
                    stop  = max(stop),
-                   state = (state)
-                 ),
+                   state = (state),
+                   raw_state = mean(state_raw),
+                   n_genes   = .N,
+                   genes     = paste(gene,   # ← gene names
+                   collapse = ";"),
+                   genes_total_length = sum(
+                     stop - start)
+                   ),
                  by = .(reference, cell_name, chr, block_id)
   ]
   
@@ -163,15 +169,16 @@ collapse_genes_to_cnv_segments <- function(gene_cnv_df) {
 }
 
 
-filt_remove_refs_cells <- function(df, metadata, filter_seq_mb, mode) {
+filt_remove_refs_cells <- function(df, metadata, filter_seq_mb, mode,
+                                   remove_ref = TRUE) {
   
   # ---- Pre-filter ---------------------------------------------------------
   n_input <- nrow(df)
   
   df <- df |>
-    dplyr::arrange(reference, cell_name, chr, state, start) |>
+    dplyr::arrange(reference, cell_name, chr, cnv_state, start) |>
     dplyr::mutate(
-      cnv_length    = as.numeric(stop) - as.numeric(start) + 1,
+      cnv_length    = as.numeric(end) - as.numeric(start) + 1,
       cnv_length_mb = cnv_length / 1e6
     ) |>
     dplyr::filter(cnv_length_mb > filter_seq_mb)
@@ -209,10 +216,11 @@ filt_remove_refs_cells <- function(df, metadata, filter_seq_mb, mode) {
   #   — comparing a group against itself inflates similarity
   # In across mode: cells whose cell type IS the reference are removed
   #   — a cell type cannot serve as its own reference
+  if (remove_ref) {
+    
+    n_before_ref_removal <- nrow(df_joined)
   
-  n_before_ref_removal <- nrow(df_joined)
-  
-  if (mode == "within") {
+    if (mode == "within") {
     
     df_joined <- df_joined |>
       dplyr::filter(!(reference == split_group)) |>
@@ -230,7 +238,7 @@ filt_remove_refs_cells <- function(df, metadata, filter_seq_mb, mode) {
     n_before_ref_removal - nrow(df_joined)
     ))
     
-  } else if (mode == "across") {
+    } else if (mode == "across") {
     
     df_joined <- df_joined |>
       dplyr::filter(!(reference == cell_type)) |>
@@ -248,7 +256,7 @@ filt_remove_refs_cells <- function(df, metadata, filter_seq_mb, mode) {
     nrow(df_joined),
     n_before_ref_removal - nrow(df_joined)
     ))
-  }
+    }
   
   # ---- Final check --------------------------------------------------------
   if (nrow(df_joined) == 0L) {
@@ -267,9 +275,9 @@ filt_remove_refs_cells <- function(df, metadata, filter_seq_mb, mode) {
     nrow(df_joined),
     dplyr::n_distinct(df_joined$cell_name),
     mode
-  ))
+  ))}
   
-  df_joined
+  return(df_joined)
 }
 
 #' Merge nearby CNV segments
@@ -313,6 +321,7 @@ merge_nearby_regions <- function(df, max_gap = 100000L) {
       start      = min(start),
       end        = max(stop),
       n_segments = n(),
+      raw_state  = mean(raw_state),
       .groups    = "drop"
     ) %>%
     dplyr::rename(cnv_state = state) %>%
@@ -532,8 +541,10 @@ find_maximal_cliches <- function(q_pass, s_pass, grp){
 
 
 
+
 process_cnv_cluster <- function(grp,overlap_method,min_overlap){
-  n   <- nrow(grp)
+  
+  n           <- nrow(grp)
 
   # Single-segment group — trivially its own equivalence class
   if (n == 1L) {
@@ -584,7 +595,10 @@ process_cnv_cluster <- function(grp,overlap_method,min_overlap){
     return(list(rows = grp[0,], n_duplicated = 0L, removed = removed_log))
   }
 
-  res <- find_maximal_cliches(q_pass, s_pass,grp)
+  res <- find_maximal_cliches(q_pass, s_pass, grp)
+  
+  
+  return(res)
   
   
   return(res)
@@ -656,7 +670,6 @@ assign_cnv_equivalence <- function(
   n_rows_postfilter <- nrow(df)
   
   # ---- Split into groups --------------------------------------------------
-  
   group_indices <- df |>
     dplyr::mutate(.row_idx = dplyr::row_number()) |>
     dplyr::group_by(dplyr::across(all_of(by_columns))) |>
@@ -805,7 +818,6 @@ assign_cnv_equivalence <- function(
 #' @return A data frame with one row per cell and equivalence group, including
 #'   genomic span and reference support counts.
 summarize_cnv_support <- function(df) {
-  
   required <- c(
     "cnv_equiv_id", "reference", "cell_name",
     "chr", "cnv_state", "start", "end"
@@ -821,6 +833,16 @@ summarize_cnv_support <- function(df) {
       cnv_length_mb = cnv_length / 1e6,
       n_references = n_distinct(reference),
       references   = paste(sort(unique(reference)), collapse = ","),
+      raw_state    = mean(raw_state),
+      genes = paste(
+        unique(trimws(unlist(
+          strsplit(genes, ";")
+        ))),
+        collapse = ";"
+      ),
+      n_genes = dplyr::n_distinct(
+        trimws(unlist(strsplit(genes, ";")))
+      ),
       .groups = "drop"
     ) %>%
     filter(!is.na(cnv_equiv_id))
@@ -1098,6 +1120,16 @@ resolve_shared_cliques <- function(
       # Recompute length from updated coordinates
       cnv_length    = end - start + 1L,
       cnv_length_mb = (end - start + 1L) / 1e6,
+      raw_state     = mean(raw_state),
+      genes = paste(
+        unique(trimws(unlist(
+          strsplit(genes, ";")
+        ))),
+        collapse = ";"
+      ),
+      n_genes = dplyr::n_distinct(
+        trimws(unlist(strsplit(genes, ";")))
+      ),
       .groups       = "drop"
     )
   
@@ -1146,6 +1178,529 @@ resolve_shared_cliques <- function(
 }
 
 
+# ── Core density computation ───────────────────────────────────────────────────
+# Used by both filter and merge steps
+compute_segment_density <- function(
+    df,
+    coding_gr,
+    expressed_gr,         
+    coding_expressed_set,  
+    start_col = "start",
+    stop_col  = "stop"
+) {
+  
+  if (!"genes" %in% colnames(df)) {
+    stop(
+      "df must contain 'genes' column from ",
+      "collapse_genes_to_cnv_segments()."
+    )
+  }
+  
+  seg_gr <- GenomicRanges::GRanges(
+    seqnames = df$chr,
+    ranges   = IRanges::IRanges(
+      start = df[[start_col]],
+      end   = df[[stop_col]]
+    )
+  )
+  seg_gr$seg_idx <- seq_len(nrow(df))
+  
+  # ── n_total_protein_coding ────────────────────────────────────────────────
+  # ALL coding + lncRNA genes in segment from GTF
+  # coordinate-based, not expression-based
+  hits_coding <- GenomicRanges::findOverlaps(
+    seg_gr, coding_gr, type = "any")
+  
+  coding_counts <- if (length(hits_coding) > 0) {
+    data.frame(
+      seg_idx = S4Vectors::queryHits(hits_coding),
+      gene    = coding_gr$gene[
+        S4Vectors::subjectHits(hits_coding)]
+    ) %>%
+      dplyr::group_by(seg_idx) %>%
+      dplyr::summarise(
+        n_total_protein_coding = dplyr::n(),
+        .groups = "drop"
+      )
+  } else {
+    data.frame(
+      seg_idx                = integer(0),
+      n_total_protein_coding = integer(0)
+    )
+  }
+  
+  # ── n_expressing_genes ────────────────────────────────────────────────────
+  # Genes in @gene_order overlapping segment
+  # = genes inferCNV used (passed cutoff)
+  # same for all cells — sample level ✅
+  hits_expressed <- GenomicRanges::findOverlaps(
+    seg_gr, expressed_gr, type = "any")
+  
+  expressed_counts <- if (length(hits_expressed) > 0) {
+    data.frame(
+      seg_idx = S4Vectors::queryHits(hits_expressed)
+    ) %>%
+      dplyr::count(seg_idx,
+                   name = "n_expressing_genes")
+  } else {
+    data.frame(
+      seg_idx            = integer(0),
+      n_expressing_genes = integer(0)
+    )
+  }
+  
+  # ── n_coding_expressed ────────────────────────────────────────────────────
+  # Per-cell: genes in THIS cell's gene_list
+  # that are also in coding_expressed_set
+  # coding_expressed_set = intersect(
+  #   coding genes from GTF,
+  #   expressed genes from @gene_order
+  # )
+  # → protein coding genes that inferCNV
+  #   actually detected in this sample ✅
+  # → then filtered to which ones THIS
+  #   cell has in its segment ✅
+  
+  result <- df %>%
+    dplyr::mutate(
+      seg_idx   = seq_len(dplyr::n()),
+      gene_list = strsplit(genes, ";")
+    ) %>%
+    dplyr::left_join(coding_counts,
+                     by = "seg_idx") %>%
+    dplyr::left_join(expressed_counts,
+                     by = "seg_idx") %>%
+    dplyr::mutate(
+      
+      n_total_protein_coding = tidyr::replace_na(
+        n_total_protein_coding, 0L),
+      n_expressing_genes     = tidyr::replace_na(
+        n_expressing_genes, 0L),
+      
+      cnv_length_mb = (
+        .data[[stop_col]] -
+        .data[[start_col]] + 1) / 1e6,
+      
+      # Per-cell: how many genes in THIS
+      # cell's segment are coding AND expressed
+      # in this sample ✅
+      n_coding_expressed = purrr::map_int(
+        gene_list,
+        function(g) {
+          if (length(g) == 0) return(0L)
+          sum(g %in% coding_expressed_set)
+        }
+      ),
+      
+      coding_density = round(
+        n_total_protein_coding / cnv_length_mb, 1),
+      
+      expressed_density = round(
+        n_expressing_genes / cnv_length_mb, 1),
+      
+      # pct of coding genes in this segment
+      # that THIS cell expressed ✅
+      pct_coding_expressed = round(
+        100 * n_coding_expressed /
+          pmax(n_total_protein_coding, 1), 1)
+      
+    ) %>%
+    dplyr::select(-seg_idx, -gene_list)
+  
+  return(result)
+}
+
+
+
+
+# ── Apply density filter ───────────────────────────────────────────────────────
+apply_density_filter <- function(
+    df,
+    pct_max          = 45,
+    pct_floor        = 30,
+    min_expr_density = 1.5,
+    min_coding_density = 1.0
+) {
+  df %>%
+    dplyr::mutate(
+      pct_threshold = pmax(
+        pct_floor,
+        pct_max / sqrt(pmax(expressed_density, 0.01))
+      ),
+      passes_coding_density    = coding_density    >= min_coding_density,
+      passes_expressing_density = expressed_density >= min_expr_density,
+      passes_pct               = pct_coding_expressed >= pct_threshold
+    ) %>%
+    dplyr::filter(
+      passes_coding_density,
+      passes_expressing_density,
+      passes_pct
+    ) %>%
+    dplyr::select(
+      -pct_threshold,
+      -passes_coding_density,
+      -passes_expressing_density,
+      -passes_pct
+    )
+}
+
+
+
+# ── Pre-merge filter ───────────────────────────────────────────────────────────
+filter_segments_by_gene_density <- function(
+    collapse_df,
+    gene_order,
+    coding_gr,
+    coding_expressed_set,
+    pct_max            = 45,
+    pct_floor          = 30,
+    min_expr_density   = 1.5,
+    min_coding_density = 1.0
+) {
+  
+  # Build expressed_gr from gene_order
+  expressed_table <- as.data.frame(gene_order)
+  expressed_table$gene <- rownames(expressed_table)
+  colnames(expressed_table) <- c("chr", "start",
+                                  "stop", "gene")
+  expressed_gr <- GenomicRanges::GRanges(
+    seqnames = expressed_table$chr,
+    ranges   = IRanges::IRanges(
+      start = expressed_table$start,
+      end   = expressed_table$stop
+    )
+  )
+  expressed_gr$gene <- expressed_table$gene
+  
+  cat("  expressed_gr:",
+      length(expressed_gr), "genes\n")
+  
+  n_before <- nrow(collapse_df)
+  
+  if (nrow(coding_counts) == 0) {
+    message("  No coding genes found — skipping")
+    return(collapse_df)
+  }
+  
+  result <- collapse_df %>%
+    compute_segment_density(
+      coding_gr            = coding_gr,
+      expressed_gr         = expressed_gr,
+      coding_expressed_set = coding_expressed_set
+    ) %>%
+    apply_density_filter(
+      pct_max            = pct_max,
+      pct_floor          = pct_floor,
+      min_expr_density   = min_expr_density,
+      min_coding_density = min_coding_density
+    )
+  
+  message(sprintf(
+    "  Pre-merge filter: %d → %d (removed %d)",
+    n_before, nrow(result),
+    n_before - nrow(result)
+  ))
+  
+  return(result)
+}
+
+
+filter_segments_by_gene_density <- function(
+    collapse_df,
+    gene_order,
+    coding_gr,
+    coding_expressed_set,
+    pct_max            = 45,
+    pct_floor          = 30,
+    min_expr_density   = 1.5,
+    min_coding_density = 1.0
+) {
+  
+  # Build expressed_gr from gene_order
+  expressed_table <- as.data.frame(gene_order)
+  expressed_table$gene <- rownames(expressed_table)
+  colnames(expressed_table) <- c("chr", "start",
+                                  "stop", "gene")
+  expressed_gr <- GenomicRanges::GRanges(
+    seqnames = expressed_table$chr,
+    ranges   = IRanges::IRanges(
+      start = expressed_table$start,
+      end   = expressed_table$stop
+    )
+  )
+  expressed_gr$gene <- expressed_table$gene
+  
+  cat("  expressed_gr:", length(expressed_gr), "genes\n")
+  
+  n_before <- nrow(collapse_df)
+  
+  # ── Compute density ───────────────────────────────────────────────────────
+  result <- compute_segment_density(
+    df                   = collapse_df,
+    coding_gr            = coding_gr,
+    expressed_gr         = expressed_gr,
+    coding_expressed_set = coding_expressed_set
+  )
+  
+  # ── Checking if there are any results whatsoever ────────────────────────────
+  if (all(result$n_total_protein_coding == 0)) {
+    message(
+      "  No coding genes overlap any segment — ",
+      "skipping filter, returning unchanged.\n",
+      "  Likely chromosome naming mismatch: ",
+      "check seg_gr vs coding_gr seqnames"
+    )
+    return(collapse_df)
+  }
+  
+  # ── Apply filter ──────────────────────────────────────────────────────────
+  result <- result %>%
+    apply_density_filter(
+      pct_max            = pct_max,
+      pct_floor          = pct_floor,
+      min_expr_density   = min_expr_density,
+      min_coding_density = min_coding_density
+    )
+  
+  message(sprintf(
+    "  Pre-merge filter: %d → %d (removed %d)",
+    n_before, nrow(result),
+    n_before - nrow(result)
+  ))
+  
+  return(result)
+}
+# ── Merge + post-merge density check ──────────────────────────────────────────
+merge_and_density_check <- function(
+    df,
+    gene_order,
+    coding_gr,
+    coding_expressed_set,
+    max_gap_mb         = 10,
+    pct_max            = 45,
+    pct_floor          = 30,
+    min_expr_density   = 1.5,
+    min_coding_density = 1.0
+) {
+  
+  # Build expressed_gr
+  expressed_table <- as.data.frame(gene_order)
+  expressed_table$gene <- rownames(expressed_table)
+  colnames(expressed_table) <- c("chr", "start",
+                                  "stop", "gene")
+  expressed_gr <- GenomicRanges::GRanges(
+    seqnames = expressed_table$chr,
+    ranges   = IRanges::IRanges(
+      start = expressed_table$start,
+      end   = expressed_table$stop
+    )
+  )
+  
+  n_before   <- nrow(df)
+  max_gap_bp <- max_gap_mb * 1e6
+  
+  cat("=== Merge + density check ===\n")
+  cat("  max_gap:     ", max_gap_mb, "Mb\n")
+  cat("  min_density: ", min_expr_density, "\n")
+  cat("  Input:       ", n_before, "\n")
+  
+  # ── Step 1: Merge ──────────────────────────────────────────────────────────
+  cat("\n[1] Merging within", max_gap_mb, "Mb...\n")
+  
+  merged_df <- df %>%
+    dplyr::group_by(
+      reference, cell_name, chr, state
+    ) %>%
+    dplyr::arrange(start, .by_group = TRUE) %>%
+    dplyr::mutate(
+      gap_bp    = start - dplyr::lag(stop),
+      new_block = is.na(gap_bp) |
+                  gap_bp > max_gap_bp,
+      merge_id  = cumsum(new_block)
+    ) %>%
+    dplyr::group_by(
+      reference, cell_name, chr,
+      state, merge_id
+    ) %>%
+    dplyr::summarise(
+      start      = min(start),
+      end       = max(stop),
+      n_segments = dplyr::n(),
+      raw_state  = mean(raw_state, na.rm = TRUE),
+      genes      = paste(
+      unique(trimws(unlist(
+        strsplit(genes, ";")
+      ))),
+      collapse = ";"
+    ),
+    n_genes    = dplyr::n_distinct(trimws(unlist(
+      strsplit(genes, ";")
+    ))),
+    genes_total_length = sum(
+      genes_total_length, na.rm = TRUE),
+      .groups    = "drop"
+    ) %>%
+    dplyr::select(-merge_id) %>%
+    dplyr::rename(cnv_state = state)
+  
+  cat("  After merge:", nrow(merged_df), "\n")
+  
+  # ── Step 2: Post-merge density check ──────────────────────────────────────
+  cat("\n[2] Post-merge density check...\n")
+  
+  result <- merged_df %>%
+    compute_segment_density(
+      coding_gr            = coding_gr,
+      expressed_gr         = expressed_gr,
+      coding_expressed_set = coding_expressed_set,
+      stop_col  = "end"
+    ) %>%
+    apply_density_filter(
+      pct_max            = pct_max,
+      pct_floor          = pct_floor,
+      min_expr_density   = min_expr_density,
+      min_coding_density = min_coding_density
+    )
+  
+  message(sprintf(paste0(
+    "Merge + density check:\n",
+    "  Input:         %d\n",
+    "  After merge:   %d\n",
+    "  After density: %d\n",
+    "  Total removed: %d (%.1f%%)"
+  ),
+  n_before, nrow(merged_df), nrow(result),
+  n_before - nrow(result),
+  100 * (n_before - nrow(result)) / n_before
+  ))
+  
+  return(result)
+}
+
+
+
+add_gene_length_stats <- function(
+    df,
+    expressed_gr,
+    start_col = "start",
+    end_col   = "end"
+) {
+  
+  cat("=== Adding gene length stats ===\n")
+  cat("  Input rows:", nrow(df), "\n")
+  
+  seg_gr <- GenomicRanges::GRanges(
+    seqnames = df$chr,
+    ranges   = IRanges::IRanges(
+      start = df[[start_col]],
+      end   = df[[end_col]]
+    )
+  )
+  seg_gr$seg_idx <- seq_len(nrow(df))
+  
+  hits <- GenomicRanges::findOverlaps(
+    seg_gr, expressed_gr, type = "any")
+  
+  if (length(hits) == 0) {
+    message("  No overlaps — returning zeros")
+    return(df %>%
+      dplyr::mutate(
+        genes_total_length = 0L,
+        gene_coverage_pct  = 0
+      ))
+  }
+  
+  s_idx <- S4Vectors::subjectHits(hits)
+  
+  
+  gene_stats <- data.frame(
+    seg_idx     = S4Vectors::queryHits(hits),
+    gene_length = GenomicRanges::width(
+      expressed_gr)[s_idx]
+  ) %>%
+    dplyr::group_by(seg_idx) %>%
+    dplyr::summarise(
+      genes_total_length = sum(gene_length,
+                               na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  df %>%
+    dplyr::mutate(seg_idx = seq_len(dplyr::n())) %>%
+    dplyr::left_join(gene_stats, by = "seg_idx") %>%
+    dplyr::mutate(
+      genes_total_length = tidyr::replace_na(
+        genes_total_length, 0L),
+     
+      gene_coverage_pct  = round(
+        100 * genes_total_length /
+          pmax((.data[[end_col]] -
+                .data[[start_col]] + 1L), 1), 1)
+    ) %>%
+    dplyr::select(-seg_idx)
+}
+
+
+compute_all_segment_stats <- function(
+    df,
+    coding_gr,
+    gene_order,
+    coding_expressed_set,
+    start_col = "start",
+    stop_col  = "stop"
+) {
+  
+  expressed_table <- as.data.frame(gene_order)
+  expressed_table$gene <- rownames(expressed_table)
+  colnames(expressed_table) <- c("chr", "start",
+                                "stop", "gene") 
+  expressed_gr <- GenomicRanges::GRanges(
+  seqnames = expressed_table$chr,
+  ranges   = IRanges::IRanges(
+    start = expressed_table$start,
+    end   = expressed_table$stop))
+    
+ expressed_gr$gene <- expressed_table$gene
+ 
+ cat("=== Computing all segment stats ===\n")
+  
+  # ── Step 1: Gene density (coding + expressed) ─────────────────────────────
+  cat("\n[1] Gene density stats...\n")
+  result <- compute_segment_density(
+    df                   = df,
+    coding_gr            = coding_gr,
+    expressed_gr         = expressed_gr,
+    coding_expressed_set = coding_expressed_set,
+    start_col            = start_col,
+    stop_col             = stop_col
+  )
+  
+  # ── Step 2: Gene length stats ─────────────────────────────────────────────
+  cat("\n[2] Gene length stats...\n")
+  print(colnames(result))
+  result <- add_gene_length_stats(
+    df           = result,
+    expressed_gr = expressed_gr,
+    start_col    = start_col,
+    end_col      = stop_col
+  )
+  
+  cat("\n=== Done ===\n")
+  cat("  Rows:                    ", nrow(result), "\n")
+  cat("  Median expressed_density:",
+      median(result$expressed_density,
+             na.rm = TRUE), "\n")
+  cat("  Median coding_density:   ",
+      median(result$coding_density,
+             na.rm = TRUE), "\n")
+  cat("  Median gene_coverage_pct:",
+      median(result$gene_coverage_pct,
+             na.rm = TRUE), "\n")
+  
+  return(result)
+}
+
+
 #' Run a fast CNV event consolidation pipeline
 #'
 #' Runs a CNV processing workflow from gene-level calls to merged CNV events
@@ -1172,18 +1727,63 @@ run_fast_cnv_pipeline <- function(
     clique_mode_consistent = "connected",
     removed_log_return = F,
     mode = "within",
-    metadata 
+    metadata,
+    remove_ref = T,
+    gene_order           = NULL,
+    coding_gr            = NULL,
+    coding_expressed_set = NULL,
+    pct_max              = 45,
+    pct_floor            = 30,
+    min_expr_density     = 1.5,
+    min_coding_density   = 1.0,
+    max_gap_mb           = 10
 ) {
+
+  has_density_params <- !is.null(gene_order) &&
+                        !is.null(coding_gr)  &&
+                        !is.null(coding_expressed_set)
+  
+  if (!has_density_params) {
+    stop(
+      "gene_order, coding_gr and coding_expressed_set ",
+      "are required for run_fast_cnv_pipeline.\n",
+      "These are needed for gene density filter ",
+      "and post-merge density check."
+    )
+  }
+  
+  
   message("→ Collapsing genes to segments")
   segments <- collapse_genes_to_cnv_segments(gene_cnv_df = gene_level_df)
   
-  message("→ Removing reference cells")
-  filt_segments <- filt_remove_refs_cells(segments, metadata, filter_seq_mb = filter_seq_mb_init, mode)
   
-  message("→ Merging nearby CNVs")
-  merged <- merge_nearby_regions(df = filt_segments, max_gap = max_gap)
-
- 
+    segments <- filter_segments_by_gene_density(
+    collapse_df          = segments,
+    gene_order           = gene_order,
+    coding_gr            = coding_gr,
+    coding_expressed_set = coding_expressed_set,
+    pct_max              = pct_max,
+    pct_floor            = pct_floor,
+    min_expr_density     = min_expr_density,
+    min_coding_density   = min_coding_density
+  )
+  
+    merged <- merge_and_density_check(
+    df                   = segments,
+    gene_order           = gene_order,
+    coding_gr            = coding_gr,
+    coding_expressed_set = coding_expressed_set,
+    max_gap_mb           = max_gap_mb,
+    pct_max              = pct_max,
+    pct_floor            = pct_floor,
+    min_expr_density     = min_expr_density,
+    min_coding_density   = min_coding_density
+  )
+  
+  message("→ Removing reference cells")
+  filt_segments <- filt_remove_refs_cells(merged, metadata, filter_seq_mb = filter_seq_mb_init, mode,
+                                          remove_ref = remove_ref)
+  
   message("→ Assigning CNV equivalence")
   equiv <- assign_cnv_equivalence(
     df = merged,
@@ -1206,7 +1806,7 @@ run_fast_cnv_pipeline <- function(
     min_references = min_references
   )
 
-  final_consistent_events <-resolve_shared_cliques(
+  final_consistent_events <- resolve_shared_cliques(
     all_segments = table_with_equiv_id, 
     consistent = supported_events, 
     coord_cols = c("cell_name", "chr", "cnv_state", "start", "end","cnv_length", "cnv_length_mb", "reference"),
@@ -1217,6 +1817,13 @@ run_fast_cnv_pipeline <- function(
     n_cores        = cores
   )
   
+  final_consistent_events <- compute_all_segment_stats(
+    final_consistent_events,
+    coding_gr,
+    gene_order,
+    coding_expressed_set,
+    start_col = "start",
+    stop_col  = "end")
     
   if(removed_log_return){
     list(

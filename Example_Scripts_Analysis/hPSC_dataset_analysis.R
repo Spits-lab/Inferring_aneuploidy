@@ -35,10 +35,12 @@ install_if_missing <- function(pkgs, installer) {
   }
 }
 
-source("~/GitHub/Inferring_aneuploidy/R/Functions_Processing_InferCNV.R")
-source("~/GitHub/Inferring_aneuploidy/R/Score_system.R")
-source("~/GitHub/Inferring_aneuploidy/R/GSVA.R")
-source("~/GitHub/Inferring_aneuploidy/R/GSEA.R")
+source("~/GitHub/cnvscfinder/R/cnv_annotation.R")
+source("~/GitHub/cnvscfinder/R/cnv_processing.R")
+source("~/GitHub/cnvscfinder/R/cnv_scoring.R")
+source("~/GitHub/cnvscfinder/R/gsva_gsea.R")
+source("~/GitHub/cnvscfinder/R/infercnv.R")
+source("~/GitHub/cnvscfinder/R/pipeline.R")
 
 
 ############################################################################################################-
@@ -49,7 +51,7 @@ source("~/GitHub/Inferring_aneuploidy/R/GSEA.R")
 obj_list <- make_infercnv_objects(
   counts_mx       = counts_mx,
   metadata        = metadata,
-  cell_type_col   = "cell_type",              # column name in your metadata
+  cell_type_col   = "cell_type",            
   gene_order_file = "~/VUB/InferCNV/InferCNV_RScripts/hg38_gencode_v27.txt",
   mode            = "within",                  
   chr_exclude     = c("MT", "Y"),
@@ -149,6 +151,8 @@ hepsc <- test
 
 load("C:/Users/pmgra/Documents/VUB/InferCNV/chromossome_arms.RData")
 
+chromossome_arms <- chromosome_arms
+saveRDS(chromosome_arms, file ="chromossome_arms.rds")
 
 f_df <- lapply(hepsc[["within"]], function(x) {
   x[["cnvs_supported_overlaped"]]

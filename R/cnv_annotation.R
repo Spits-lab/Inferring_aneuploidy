@@ -1,3 +1,15 @@
+#' @title cnv_annotation
+#'
+#' @description
+#' 
+#' Functions that helps in the annotation different CNVs with their chromosome information (arm, and coverage)
+#' 
+#' @author Pedro Granjo
+#' @date 02-09-2026
+#'
+
+
+
 #' Compute overlap in base pairs between two intervals
 #'
 #' @param a_start,a_end Start and end coordinates of the first interval.

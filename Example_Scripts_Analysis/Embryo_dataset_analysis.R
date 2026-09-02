@@ -179,7 +179,7 @@ plot_cnv_karyotype(
 ############################################################################### -
 
 ref_dirs <- c("ref1", "ref2", "ref3")
-base_dir <- "C:/Users/pmgra/Documents/VUB/InferCNV/TE_cells_Petroupoulous_02172026"
+base_dir <- "C:/Users/pmgra/Documents/VUB/InferCNV/TE_cells_Petroupoulous_02172026/within/TE"
 infer_objs <- discover_infercnv_runs(base_dir,ref_dirs, pattern = "^run\\.final")
 #infer_objs <- discover_infercnv_runs(base_dir,ref_dirs, pattern = "^17_HMM_.*\\.infercnv_obj$")
 

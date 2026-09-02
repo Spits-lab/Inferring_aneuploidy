@@ -6,7 +6,7 @@
 #' from scRNA-seq
 #' 
 #' @author Pedro Granjo
-#' @date 13-03-2026
+#' @date 02-09-2026
 #' 
 #' 
 

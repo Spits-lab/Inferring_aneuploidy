@@ -1,11 +1,11 @@
-#' @title Score_system
+#' @title cnv_scoring
 #'
 #' @description
 #' 
 #' Functions that perform further processing from the CNV performing a final filtering and Confidence Score in a Single Tool Approach
 #' 
 #' @author Pedro Granjo
-#' @date 13-03-2026
+#' @date 02-09-2026
 #'
 
 
@@ -100,7 +100,6 @@ cluster_cnv_events_by <- function(df, by = NULL, overlap_method = "reciprocal", 
   
   if (is.null(by)) {
     by_columns <- mandatory_group 
-    return(out)
   } else{
     by_columns <- c(by,mandatory_group)
   }
@@ -161,16 +160,24 @@ summarise_cnv_loci <- function(df, by = NULL,
   if (length(missing_cols) > 0) {
     stop("Missing required columns: ", paste(missing_cols, collapse = ", "))
   }
-  
-  if (!any(by %in% colnames(df))) {
-    stop("Missing sample column: ", sample_col)
+  if (!is.null(by)) {
+    missing_by <- setdiff(by, colnames(df))
+    if (length(missing_by) > 0) {
+      stop("Grouping columns not found: ",
+           paste(missing_by, collapse = ", "))
+    }
   }
   
+  # ── Validate cell and sample columns ──────────────────────────────────────
   if (!cell_col %in% colnames(df)) {
     stop("Missing cell column: ", cell_col)
   }
+  if (!sample_col %in% colnames(df)) {
+    stop("Missing sample column: ", sample_col)
+  }
   
   grouping_vars <- c(by, "cnv_equiv_id", "chr", "cnv_state")
+  
   
   df <- df %>%
     dplyr::group_by(dplyr::across(dplyr::all_of(grouping_vars)))
@@ -208,46 +215,58 @@ summarise_cnv_loci <- function(df, by = NULL,
 #' * `clustered_events` — CNV events with cluster assignments
 #' * `cnv_locus_summary` — summarised CNV loci
 #'
-run_cnv_locus_analysis <- function(df, by = NULL, min_ovelap = 0.75, sample_col, cell_col, overlap_method = "reciprocal",
-                                   parallel = F, n_cores = 1L, removed_log_retur = F){
+run_cnv_locus_analysis <- function(
+    df,
+    by               = NULL,
+    min_ovelap       = 0.75,
+    sample_col,
+    cell_col,
+    overlap_method   = "reciprocal",
+    parallel         = FALSE,
+    n_cores          = 1L,
+    removed_log_retur = FALSE) {
   
+  # ── Step 1: Cluster CNV events ──────────────────────────────────────────────
   clustered <- cluster_cnv_events_by(
-    df = df,
-    by = by,
+    df             = df,
+    by             = by,
     overlap_method = overlap_method,
-    min_ovelap = min_ovelap,
-    parallel = parallel, n_cores = n_cores
+    min_ovelap     = min_ovelap,
+    parallel       = parallel,
+    n_cores        = n_cores
   )
-  
-  
-
   clustered_table_with_equiv_id <- clustered$results_id
   
-  
+  # ── Step 2: First summary ───────────────────────────────────────────────────
   summary_tbl <- summarise_cnv_loci(
-    df = clustered_table_with_equiv_id,
-    by = by,
+    df         = clustered_table_with_equiv_id,
+    by         = by,
     sample_col = sample_col,
-    cell_col = cell_col
+    cell_col   = cell_col
   )
   
+  summary_tbl <- summary_tbl %>%
+    dplyr::rename(
+      start         = locus_start,
+      end           = locus_end,
+      cnv_length    = locus_width,
+      cnv_length_mb = locus_width_mb
+    )
   
-  if(removed_log_retur){
-    list(
-      clustered_events = clustered_table_with_equiv_id,
-      remove_log = clustered$removed_log,
-      cnv_locus_summary = summary_tbl
-    )
-  } else{
-    list(
-      clustered_events = clustered_table_with_equiv_id,
-      cnv_locus_summary = summary_tbl
-    )
-  }
-
+    if (removed_log_retur) {
+      return(list(
+        clustered_events  = clustered_table_with_equiv_id,
+        remove_log        = clustered$removed_log,
+        cnv_locus_summary = summary_tbl
+      ))
+    } else {
+      return(list(
+        clustered_events  = clustered_table_with_equiv_id,
+        cnv_locus_summary = summary_tbl
+      ))
+    }
+  
 }
-
-
 
 
 #' Filter CNV loci based on minimum cell thresholds
@@ -263,61 +282,110 @@ run_cnv_locus_analysis <- function(df, by = NULL, min_ovelap = 0.75, sample_col,
 #' @return
 #' Filtered CNV locus data frame.
 filter_cnv_loci <- function(
-    total_chromosome_permission  = 70,
-    clustered_events = NULL
+    p_arm_permission     = 70,
+    q_arm_permission     = 70,
+    clustered_events     = NULL,
+    whole_chr_permission = 60
 ) {
-  
-  # ---- Input validation ---------------------------------------------------
   
   required_cols <- c(
     "n_cells",
     "arm_class",
     "whole_chromosome_gain",
-    "whole_chromosome_loss"
+    "whole_chromosome_loss",
+    "p_arm_pct",
+    "q_arm_pct",
+    "p_centromere_pct",
+    "centromere_q_pct"
   )
   
-  missing_cols <- setdiff(required_cols, colnames(clustered_events))
+  missing_cols <- setdiff(required_cols,
+                          colnames(clustered_events))
   if (length(missing_cols) > 0) {
-    stop("Missing required columns: ", paste(missing_cols, collapse = ", "))
+    stop("Missing required columns: ",
+         paste(missing_cols, collapse = ", "),
+         "\nDid you run add_arm_percentages() first?")
   }
   
-  # ---- Threshold resolution -----------------------------------------------
-  
   n_before <- nrow(clustered_events)
-    
-    out <- clustered_events |>
-      dplyr::mutate(
-        max_chr_event = pmax(
-          whole_chromosome_gain,
-          whole_chromosome_loss,
-          na.rm = TRUE
-        ),
-        pass_cells      = case_when(is.na(effective_threshold) ~ F,
-                                    n_cells >= effective_threshold ~ T),
-        pass_centromere = !(arm_class == "p_centromere_q" &
-                              max_chr_event < total_chromosome_permission)
-      ) |>
-      dplyr::filter(pass_cells, pass_centromere) |>
-      dplyr::select(-all_of(c("max_chr_event",
-                       "pass_cells", "pass_centromere", "effective_threshold")))
-    
   
-  # ---- Reporting ----------------------------------------------------------
-  n_after         <- nrow(out)
-  n_removed_cells <- length(unique(clustered_events["cell_name"])) - length(unique(out["cell_name"]))
+  out <- clustered_events %>%
+    dplyr::mutate(
+      max_chr_event = pmax(
+        whole_chromosome_gain,
+        whole_chromosome_loss,
+        na.rm = TRUE
+      ),
+      pass_cells = dplyr::case_when(
+        is.na(effective_threshold)     ~ FALSE,
+        n_cells >= effective_threshold ~ TRUE,
+        TRUE                           ~ FALSE
+      ),
+      
+      pass_centromere = dplyr::case_when(
+        
+        # p_arm: always pass
+        # no centromere concern
+        arm_class == "p_arm" ~ TRUE,
+        
+        # q_arm: always pass
+        # no centromere concern
+        arm_class == "q_arm" ~ TRUE,
+        
+        # p_centromere_q: both arms must pass
+        # compensates for arm length differences
+        arm_class == "p_centromere_q" ~
+          dplyr::coalesce(
+            p_arm_pct >= p_arm_permission &
+              q_arm_pct >= q_arm_permission & max_chr_event >= whole_chr_permission,
+            FALSE
+          ),
+        
+        # p_centromere: p arm only
+        # centromere length removed
+        arm_class == "p_centromere" ~
+          dplyr::coalesce(
+            p_centromere_pct >= p_arm_permission,
+            FALSE
+          ),
+        
+        # centromere_q: q arm only
+        # centromere length removed
+        arm_class == "centromere_q" ~
+          dplyr::coalesce(
+            centromere_q_pct >= q_arm_permission,
+            FALSE
+          ),
+        
+        # Any other arm class: pass
+        TRUE ~ TRUE
+      )
+      
+    ) %>%
+    dplyr::filter(pass_cells,
+                  pass_centromere) %>%
+    dplyr::select(
+      -dplyr::all_of(c("pass_cells",
+                       "pass_centromere",
+                       "effective_threshold", "max_chr_event"))
+    )
+  
+  n_after <- nrow(out)
   
   message(sprintf(paste0(
     "Cell filter summary:\n",
     "  Input:                    %d rows\n",
     "  Retained:                 %d rows\n",
     "  Removed (total):          %d rows (%.1f%%)\n",
-    "  Centromere threshold:     %.0f%%"
+    "  P arm threshold:          %.0f%%\n",
+    "  Q arm threshold:          %.0f%%"
   ),
   n_before,
   n_after,
   n_before - n_after,
   100 * (n_before - n_after) / n_before,
-  total_chromosome_permission
+  p_arm_permission,
+  q_arm_permission
   ))
   
   return(out)
@@ -325,293 +393,411 @@ filter_cnv_loci <- function(
 
 
 
-#' Assign confidence levels to CNV clusters
-#'
-#' Classifies CNV loci as high or low confidence based on
-#' minimum cell counts and locus length.
-#'
-#' @param summary_df Data frame containing CNV locus summaries.
-#' @param high_min_cells Minimum number of cells required for high confidence.
-#' @param high_threshold_df Optional table defining group-specific thresholds.
-#' @param group_col Column used for joining group-specific thresholds.
-#' @param min_length_mb Minimum CNV length (in Mb) required for high confidence.
-#' @param length_col Column representing CNV length.
-#' @param keep_low Logical indicating whether low-confidence clusters
-#' should be retained.
-#'
-#' @return
-#' Data frame with additional columns:
-#'
-#' * `confidence`
-#' * `pass_cells`
-#' * `pass_length`
-#' * `low_reason`
-classify_cnv_loci <- function(
-    df
-){
-  df <- df %>% dplyr::mutate( tier = as.numeric(gsub("^tier_","",tier )),
-    confidence = case_when(tier == 1 ~ "High", tier == 2 ~ "Low"))
-  return(df)
-}
-
-
-make_tier_definitions <- function(
-    base_fraction = 0.05,
-    step          = 0.03,
-    boundaries_mb   = c(25,50),
-    fractions     = NULL,
-    n_cells       = NULL,
-    mode          = c("fractions", "number")
-) {
+standardise_cluster_boundaries <- function(
+    clustered_events,
+    chromosome_arms,
+    sample_col = "sample",
+    cell_col   = "cell_name") {
   
-  mode <- match.arg(mode)
-  boundaries_mb <- sort(boundaries_mb,decreasing = T)
-  # ---- Validate boundaries_mb -----------------------------------------------
-  if (!all(diff(boundaries_mb) < 0)) {
-    stop(
-      "boundaries_mb must be strictly decreasing — ",
-      "tier 1 should have the largest minimum size.\n",
-      "  Got: ", paste(boundaries_mb, collapse = ", ")
+  cat("Standardising cluster boundaries...\n")
+  
+  n_before <- nrow(clustered_events)
+  
+  # Compute union boundaries per cluster
+  cluster_boundaries <- clustered_events %>%
+    dplyr::group_by(cnv_equiv_id) %>%
+    dplyr::summarise(
+      start_std         = min(.data$start, na.rm = TRUE),
+      end_std           = max(.data$end,   na.rm = TRUE),
+      genes_cluster     = paste(
+        unique(trimws(unlist(
+          strsplit(genes, ";")
+        ))),
+        collapse = ";"
+      ),
+      n_genes_cluster   = dplyr::n_distinct(
+        trimws(unlist(strsplit(genes, ";")))
+      ),
+      genes_total_length_cluster    = mean(
+        genes_total_length, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    dplyr::mutate(
+      cnv_length_std    = end_std - start_std,
+      cnv_length_mb_std = cnv_length_std / 1e6,
+      
+      genes_total_length_mb_cluster = 
+        genes_total_length_cluster / 1e6,
+        
+      genes_coverage_pct_cluster    = round(
+        100 * genes_total_length_cluster /
+          pmax(cnv_length_std, 1), 1)
     )
-  }
-  if (any(boundaries_mb < 0)) {
-    stop("boundaries_mb values must be non-negative.")
-  }
   
+  cat("Clusters standardised:",
+      nrow(cluster_boundaries), "\n")
   
-  # ---- Fraction resolution ------------------------------------------------
-  if(mode == "fractions"){
-    
-    if (!is.null(n_cells)) {
-      warning("n_cells ignored when selected mode is 'fractions'.")
-    }
-    
-    
-    if (!is.null(fractions)) {
-      
-      if (!is.numeric(fractions)) {
-        stop(
-          "fractions must be a numeric vector. ",
-          "Got: ", class(fractions)
-        )
-      }
-
-      if (any(fractions <= 0) || any(fractions >= 1)) {
-        stop(
-          "All fractions must be in (0, 1).\n",
-          "  Got: ", paste(round(fractions, 4), collapse = ", ")
-        )
-      }
-      
-      
-      if (!is.null(fractions) && !all(diff(fractions) > 0)) {
-        warning(
-          "fractions were not strictly increasing — sorting automatically.\n",
-          "  Got: ", paste(round(fractions, 4), collapse = ", ")
-        )
-        fractions <- sort(fractions)
-      }
-      
-      n_tiers <- length(fractions)
-      
-      if (any(fractions >= 0.25)) {
-        warning(paste(
-          "High fraction detected:",
-          paste(round(fractions[fractions >= 0.25], 3), collapse = ", "),
-          "Thresholds above 25%% of cells may produce empty results ",
-          "for small datasets or low purity samples."
-        ))
-      }
-      n_tiers <- length(fractions)
-    } else {
-      n_tiers <- length(boundaries_mb)
-
-      
-      if (!is.numeric(base_fraction) || length(base_fraction) != 1L) {
-        stop("base_fraction must be a single numeric value.")
-      }
-      if (base_fraction <= 0 || base_fraction >= 1) {
-        stop(sprintf(
-          "base_fraction must be in (0, 1). Got: %.4f", base_fraction
-        ))
-      }
-      
-      if (!is.numeric(step) || length(step) != 1L) {
-        stop("step must be a single numeric value. Got: ", class(step))
-      }
-      
-      if (step <= 0) {
-        stop("step must be positive. Got: ", step)
-      }
-      if (step >= 1) {
-        stop("step must be less than 1. Got: ", step)
-      }
-      
-      # Auto-generate fractions from base + step
-      fractions <- base_fraction + (0:(n_tiers - 1)) * step
-      
-      if (any(fractions <= 0) || any(fractions >= 1)) {
-        stop(sprintf(
-          "Generated fractions outside (0, 1) — adjust base_fraction or step.\n  Got: %s",
-          paste(round(fractions, 4), collapse = ", ")
-        ))
-      }
-      
-      if (any(fractions >= 0.25)) {
-        warning(paste(
-          "High fraction detected:",
-          paste(round(fractions[fractions >= 0.25], 3), collapse = ", "),
-          "Thresholds above 25%% of cells may produce empty results ",
-          "for small datasets or low purity samples."
-        ))
-      
-      
-      }}
-    
-    out <- data.frame(
-      tier        = paste0("tier_", seq_len(n_tiers)),
-      boundaries_mb = boundaries_mb,
-      fraction    = fractions,
-      stringsAsFactors = FALSE
-    ) 
-  }  else if(mode == "number"){
-    
-    if (!is.null(fractions)) {
-      warning("fractions ignored when mode = 'number'.")
-    }
-    
-    if (is.null(n_cells)) {
-      stop("n_cells must be provided when mode = 'number'.")
-    }
-    
-    if (!is.numeric(n_cells)) {
-      stop(
-        "n_cells must be a numeric vector. ",
-        "Got: ", class(n_cells)
-      )
-    }
-    
-    n_tiers <- length(n_cells) 
-    
-    if (any(n_cells < 1L)) {
-      stop("n_cells values must be >= 1.")
-    }
-    
-    if (n_tiers > 1L && !all(diff(n_cells) > 0)) {
-      stop(
-        "n_cells must be strictly increasing — ",
-        "tier 1 (largest CNVs) should require the fewest cells.\n",
-        "  Got: ", paste(n_cells, collapse = ", ")
-      )
-    }
-    
-    out <- data.frame(
-      tier          = paste0("tier_", seq_len(n_tiers)),
-      boundaries_mb = boundaries_mb,
-      n_cells       = as.integer(n_cells),
-      stringsAsFactors = FALSE
+  # Check how many clusters had boundary changes
+  changed <- clustered_events %>%
+    dplyr::left_join(cluster_boundaries,
+                     by = "cnv_equiv_id") %>%
+    dplyr::summarise(
+      n_start_changed = sum(start != start_std,
+                            na.rm = TRUE),
+      n_end_changed   = sum(end   != end_std,
+                            na.rm = TRUE)
     )
-  }
   
-  # ---- Report -------------------------------------------------------------
-  message(sprintf(
-    "Tier definitions created (%d tiers, mode = '%s'):", n_tiers, mode
-  ))
+  cat("Rows with start changed:",
+      changed$n_start_changed, "\n")
+  cat("Rows with end changed:  ",
+      changed$n_end_changed, "\n")
   
-  if (mode == "fractions") {
-    message(paste(
-      sprintf("  tier_%d:\n min_size = %.0f Mb\n, fraction = %.3f",
-              seq_len(n_tiers), boundaries_mb, fractions),
-      collapse = "\n"
-    ))
-  } else {
-    message(paste(
-      sprintf("  tier_%d:\n  min_size = %.0f Mb\n, n_cells = %d",
-              seq_len(n_tiers), boundaries_mb, n_cells),
-      collapse = "\n"
-    ))
-  }
+  # Apply standardised boundaries
+  result <- clustered_events %>%
+    dplyr::left_join(cluster_boundaries,
+                     by = "cnv_equiv_id") %>%
+    dplyr::mutate(
+      start          = start_std,
+      end            = end_std,
+      cnv_length     = cnv_length_std,
+      cnv_length_mb  = cnv_length_mb_std,
+      genes              = genes_cluster,
+      n_genes            = n_genes_cluster,
+      genes_total_length = genes_total_length_cluster,
+      genes_total_length_mb = genes_total_length_mb_cluster,
+      genes_coverage_pct = genes_coverage_pct_cluster
+    ) %>%
+    dplyr::select(-start_std, -end_std,
+      -cnv_length_std, -cnv_length_mb_std,
+      -genes_cluster, -n_genes_cluster,
+      -genes_total_length_cluster,
+      -genes_total_length_mb_cluster,
+      -genes_coverage_pct_cluster)
   
-  out
-}
-
-
-resolve_tier_thresholds <- function(method = c("auto", "single", "manual"),
-                                    base_fraction = 0.05,
-                                    step          = 0.03,
-                                    boundaries_mb   = c(25,50),
-                                    fractions     = NULL,
-                                    n_cells       = NULL,
-                                    mode          = c("fractions", "number")
-                                    
-) {
+  cat("Rows before:", n_before, "\n")
+  cat("Rows after: ", nrow(result), "\n")
   
-  method <- match.arg(method)
-  mode   <- match.arg(mode)
-  
-  if (length(boundaries_mb) > 2L) {
-    stop("A maximum of 2 boundaries is accepted")
-  }
-  
-  # ---- Method dispatch ----------------------------------------------------
-  if (method == "automated") {
-    warning(
-      "Automated method uses fraction-based approach only. ",
-      "For number-based thresholds use method = 'vector' and supply n_cells."
-    )
-    mode     <- "fractions"
-    fractions <- NULL
-    n_cells   <- NULL
-  }
-  
-  if (method == "fixed") {
-    message("Fixed threshold — single tier applied uniformly.")
-    
-    if (!is.null(fractions) && !is.null(n_cells)) {
-      stop("Provide either fractions or n_cells, not both.")
-    }
-    if (is.null(fractions) && is.null(n_cells)) {
-      stop("Provide either a fraction or n_cells value for the fixed threshold.")
-    }
-    
-    mode    <- if (!is.null(fractions)) "fractions" else "number"
-  }
-  
-  out <- make_tier_definitions(
-    base_fraction = base_fraction,
-    step          = step,
-    boundaries_mb   = boundaries_mb,
-    fractions     = fractions,
-    n_cells       = n_cells,
-    mode          = mode
+  # Recompute arm percentages
+  # since boundaries changed
+  cat("Recomputing arm percentages...\n")
+  result <- add_arm_percentages(
+    cnv_df          = result,
+    chromosome_arms = chromosome_arms
   )
   
-  out
+  return(result)
 }
+
+
+
+
+deduplicate_cnv_cells <- function(
+    clustered_events,
+    sample_col   = "sample",
+    cell_col     = "cell_name",
+    min_overlap  = 0.75) {
+  
+  cat("Deduplicating cells across clusters...\n")
+  cat("Min overlap threshold:", min_overlap, "\n")
+  
+  n_before <- nrow(clustered_events)
+  
+  # Find cells appearing in multiple clusters
+  # on same chr + cnv_state
+  cell_cluster_map <- clustered_events %>%
+    dplyr::group_by(
+      dplyr::across(dplyr::all_of(
+        c(cell_col, sample_col,
+          "chr", "cnv_state")
+      ))
+    ) %>%
+    dplyr::summarise(
+      n_clusters   = dplyr::n(),
+      equiv_ids    = list(cnv_equiv_id),
+      starts       = list(start),
+      ends         = list(end),
+      cnv_lengths  = list(cnv_length),
+      .groups      = "drop"
+    ) %>%
+    dplyr::filter(n_clusters > 1)
+  
+  cat("Cells in multiple clusters:",
+      nrow(cell_cluster_map), "\n")
+  
+  if (nrow(cell_cluster_map) == 0) {
+    cat("No duplicates found\n")
+    return(clustered_events)
+  }
+  
+  # For each duplicated cell
+  # find which cluster to keep
+  cells_to_remove <- lapply(
+    seq_len(nrow(cell_cluster_map)),
+    function(i) {
+      
+      row      <- cell_cluster_map[i, ]
+      ids      <- unlist(row$equiv_ids)
+      starts   <- unlist(row$starts)
+      ends     <- unlist(row$ends)
+      lengths  <- unlist(row$cnv_lengths)
+      n        <- length(ids)
+      
+      # Compute pairwise reciprocal overlap
+      # between all cluster pairs for this cell
+      keep_id <- ids[1]  # default: keep first
+      
+      if (n == 2) {
+        
+        # Overlap between two clusters
+        overlap_start <- max(starts)
+        overlap_end   <- min(ends)
+        overlap_len   <- max(0,
+                             overlap_end -
+                               overlap_start)
+        
+        # Reciprocal overlap
+        recip_overlap <- overlap_len /
+          max(lengths)
+        
+        if (recip_overlap >= min_overlap) {
+          # Same event — keep cluster
+          # with largest span
+          keep_id <- ids[which.max(lengths)]
+          remove_ids <- ids[ids != keep_id]
+          
+          return(data.frame(
+            cell      = row[[cell_col]],
+            sample    = row[[sample_col]],
+            chr       = row$chr,
+            cnv_state = row$cnv_state,
+            remove_id = remove_ids,
+            keep_id   = keep_id,
+            overlap   = recip_overlap,
+            action    = "merged"
+          ))
+        } else {
+          # Different events — keep both
+          return(data.frame(
+            cell      = row[[cell_col]],
+            sample    = row[[sample_col]],
+            chr       = row$chr,
+            cnv_state = row$cnv_state,
+            remove_id = NA_character_,
+            keep_id   = NA_character_,
+            overlap   = recip_overlap,
+            action    = "kept_both"
+          ))
+        }
+        
+      } else {
+        
+        # More than 2 clusters
+        # compute all pairwise overlaps
+        # keep cluster with most total overlap
+        overlap_scores <- sapply(
+          seq_len(n), function(j) {
+            other_starts <- starts[-j]
+            other_ends   <- ends[-j]
+            overlaps <- pmax(
+              0,
+              pmin(ends[j], other_ends) -
+                pmax(starts[j], other_starts)
+            )
+            sum(overlaps) / lengths[j]
+          }
+        )
+        
+        keep_id    <- ids[which.max(overlap_scores)]
+        remove_ids <- ids[ids != keep_id]
+        
+        return(data.frame(
+          cell      = row[[cell_col]],
+          sample    = row[[sample_col]],
+          chr       = row$chr,
+          cnv_state = row$cnv_state,
+          remove_id = remove_ids,
+          keep_id   = keep_id,
+          overlap   = max(overlap_scores),
+          action    = "merged_multiple"
+        ))
+      }
+    }
+  )
+  
+  dedup_log <- dplyr::bind_rows(cells_to_remove)
+  
+  # IDs to remove per cell
+  remove_pairs <- dedup_log %>%
+    dplyr::filter(!is.na(remove_id)) %>%
+    dplyr::select(
+      !!cell_col    := cell,
+      !!sample_col  := sample,
+      chr,
+      cnv_state,
+      remove_id
+    )
+  
+  cat("Cluster assignments to remove:",
+      nrow(remove_pairs), "\n")
+  cat("Action summary:\n")
+  print(table(dedup_log$action,
+              useNA = "always"))
+  
+  if (nrow(remove_pairs) == 0) {
+    cat("No cells removed\n")
+    return(clustered_events)
+  }
+  
+  # Remove duplicate assignments
+  result <- clustered_events %>%
+    dplyr::anti_join(
+      remove_pairs %>%
+        dplyr::rename(cnv_equiv_id = remove_id),
+      by = c(cell_col, sample_col,
+             "chr", "cnv_state",
+             "cnv_equiv_id")
+    )
+  
+  n_after <- nrow(result)
+  
+  cat("Rows before dedup:", n_before, "\n")
+  cat("Rows after dedup: ", n_after,  "\n")
+  cat("Rows removed:     ",
+      n_before - n_after, "\n")
+  
+  attr(result, "dedup_log") <- dedup_log
+  
+  return(result)
+}
+
+
+add_arm_percentages <- function(cnv_df,
+                                chromosome_arms) {
+  
+  chromosomes_with_cnv <- unique(cnv_df$chr)
+  
+  result_list <- lapply(
+    chromosomes_with_cnv,
+    function(x) {
+      
+      chr_subset <- cnv_df %>%
+        dplyr::filter(chr == x)
+      
+      chr_arms <- chromosome_arms %>%
+        dplyr::filter(chr == x)
+      
+      # ── Extract arm boundaries ─────────────────────────────────────────────
+      p_arm <- chr_arms %>% dplyr::filter(arm == "p")
+      q_arm <- chr_arms %>% dplyr::filter(arm == "q")
+      cen   <- chr_arms %>% dplyr::filter(arm == "cen")
+      
+      p_start  <- if (nrow(p_arm) == 0) NA_real_ else
+        as.numeric(p_arm$arm_start[1])
+      p_end    <- if (nrow(p_arm) == 0) NA_real_ else
+        as.numeric(p_arm$arm_end[1])
+      p_length <- if (nrow(p_arm) == 0) NA_real_ else
+        as.numeric(p_arm$arm_length[1])
+      
+      q_start  <- if (nrow(q_arm) == 0) NA_real_ else
+        as.numeric(q_arm$arm_start[1])
+      q_end    <- if (nrow(q_arm) == 0) NA_real_ else
+        as.numeric(q_arm$arm_end[1])
+      q_length <- if (nrow(q_arm) == 0) NA_real_ else
+        as.numeric(q_arm$arm_length[1])
+      
+      cen_length <- if (nrow(cen) == 0) 0 else
+        as.numeric(cen$arm_length[1])
+      
+      chr_subset %>%
+        dplyr::mutate(
+          
+          # ── Overlap of CNV with p arm ──────────────────────────────────────
+          overlap_p = pmax(0,
+            pmin(end,   p_end)   -
+            pmax(start, p_start)
+          ),
+          
+          # ── Overlap of CNV with q arm ──────────────────────────────────────
+          overlap_q = pmax(0,
+            pmin(end,   q_end)   -
+            pmax(start, q_start)
+          ),
+          
+          # ── p_arm_pct ─────────────────────────────────────────────────────
+          p_arm_pct = dplyr::case_when(
+            arm_class == "p_centromere_q" &
+              !is.na(p_length) & p_length > 0 ~
+              round(overlap_p / p_length * 100, 2),
+            TRUE ~ NA_real_
+          ),
+          
+          # ── q_arm_pct ─────────────────────────────────────────────────────
+          q_arm_pct = dplyr::case_when(
+            arm_class == "p_centromere_q" &
+              !is.na(q_length) & q_length > 0 ~
+              round(overlap_q / q_length * 100, 2),
+            TRUE ~ NA_real_
+          ),
+          
+          # ── p_centromere_pct ──────────────────────────────────────────────
+          p_centromere_pct = dplyr::case_when(
+            arm_class == "p_centromere" &
+              !is.na(p_length) & p_length > 0 ~
+              round(
+                pmax(0, overlap_p - cen_length) /
+                  p_length * 100, 2),
+            TRUE ~ NA_real_
+          ),
+          
+          # ── centromere_q_pct ──────────────────────────────────────────────
+          centromere_q_pct = dplyr::case_when(
+            arm_class == "centromere_q" &
+              !is.na(q_length) & q_length > 0 ~
+              round(
+                pmax(0, overlap_q - cen_length) /
+                  q_length * 100, 2),
+            TRUE ~ NA_real_
+          )
+        ) %>%
+        dplyr::select(-overlap_p, -overlap_q)
+    }
+  )
+  
+  dplyr::bind_rows(result_list)
+}
+
+
+
 
 
 prepare_cnv_thresholds <- function(
     summary_df,
     clustered_events,
     by_union = NULL,
-    method = c("auto", "single", "manual"),
-    max_tiers = 2,
-    base_fraction = 0.05,
-    step          = 0.03,
     cell_sizes = NULL,
-    boundaries_mb   = c(100, 50, 20),
-    fractions     = NULL,
-    n_cells       = NULL,
-    mode          = c("fractions", "number"),
-    min_cap_threshold = 2,
-    max_cap_threshold = 25,
-    round_fun = ceiling
+    k, 
+    sensitivity_floor_mb = 20,
+    min_required_cells   = 3,
+    round_fun             = ceiling
 ){
-  if(is.null(cell_sizes)){
+  
+  if (is.null(cell_sizes)) {
     stop("Your dataframe with total cell numbers is not coming through")
   }
   
-  mode <- match.arg(mode)
+  if (missing(k) || is.null(k) || !is.numeric(k) || length(k) != 1L) {
+    stop(
+      "k must be supplied as a single numeric value.\n",
+      "Derive it from one trusted calibration point:\n",
+      "  k = known_good_threshold / sqrt(known_good_n_cells)"
+    )
+  }
+  
+  if (sensitivity_floor_mb <= 0) {
+    stop("sensitivity_floor_mb must be positive.")
+  }
+  
   
   required_prepared_cols <- c(
     "cnv_equiv_id", "cnv_length_mb", "n_cells", "n_total_cells"
@@ -634,12 +820,19 @@ prepare_cnv_thresholds <- function(
     
     
     join_cols <- c(by_union, "cnv_equiv_id")
+    
+    cell_sizes_clean <- cell_sizes %>%
+      dplyr::select(
+        dplyr::all_of(by_union),
+        n_total_cells
+      )
+      
     merged_df <- clustered_events %>%
       dplyr::left_join(
         summary_df %>% dplyr::select(dplyr::all_of(join_cols), n_cells),
         by = join_cols
       ) %>%
-      dplyr::left_join(cell_sizes, by = by_union
+      dplyr::left_join(cell_sizes_clean, by = by_union
       )
     
     if (anyNA(merged_df$n_total_cells)) {
@@ -648,53 +841,46 @@ prepare_cnv_thresholds <- function(
     }
   }
   
-  if(length(boundaries_mb) > max_tiers){
-    stop(sprintf("You are trying to make more than %d groups.",
-                 max_tiers))
+  merged_df <- merged_df %>%
+    dplyr::filter(cnv_length_mb > sensitivity_floor_mb)
+  
+  if (nrow(merged_df) == 0L) {
+    stop(sprintf(
+      "No events remain above the sensitivity floor (%.1f Mb).\n",
+      sensitivity_floor_mb
+    ))
   }
   
-  tier_table <- resolve_tier_thresholds(
-    method = method,
-    base_fraction = base_fraction,
-    step          = step,
-    boundaries_mb   = boundaries_mb,
-    fractions     = fractions,
-    n_cells       = n_cells,
-    mode          = mode)
-  
-  threshold_col  <- if ("fraction" %in% colnames(tier_table)) "fraction" else "n_cells"
-  tier_sorted    <- tier_table[order(tier_table$boundaries_mb, decreasing = FALSE), ]
-  boundaries_asc <- tier_sorted$boundaries_mb
-  thresholds_asc <- tier_sorted[[threshold_col]]
-  
-  thresholded_df <- merged_df |>
+  thresholded_df <- merged_df %>%
     dplyr::mutate(
-      interval_idx  = findInterval(cnv_length_mb, boundaries_asc),
-      safe_idx      = dplyr::if_else(interval_idx == 0L, NA_integer_, interval_idx),
-      raw_threshold = thresholds_asc[safe_idx],
-      tier          = dplyr::if_else(
-        is.na(safe_idx),
-        "below_threshold",
-        tier_sorted$tier[safe_idx]
+      size_factor          = cnv_length_mb / sensitivity_floor_mb,
+      group_threshold       = k * sqrt(n_total_cells),
+      effective_threshold = dplyr::case_when(
+      cnv_length_mb >= 110 ~ 1L,
+      TRUE ~ round_fun(
+        pmax(min_required_cells, group_threshold / size_factor)
       )
-    ) |>
-    dplyr::select(-interval_idx, -safe_idx)
+    )
+    ) %>%
+    dplyr::select(-size_factor, -group_threshold)
   
-  # Apply effective_threshold computation outside mutate
-  # threshold_col is a scalar — evaluate once, apply vectorised
-  if (threshold_col == "fraction") {
-    thresholded_df <- thresholded_df |>
-      dplyr::mutate(
-        effective_threshold = round_fun(pmin(max_cap_threshold, pmax(raw_threshold * n_total_cells, min_cap_threshold)))
-      )
-  } else if (threshold_col == "number"){
-    thresholded_df <- thresholded_df |>
-      dplyr::mutate(
-        effective_threshold = round_fun(pmin(max_cap_threshold, pmax(raw_threshold, min_cap_threshold)))
-      )
-  }
-  thresholded_df <- thresholded_df |>
-    dplyr::select(-raw_threshold)
+  
+  message(sprintf(paste0(
+    "Thresholds computed:\n",
+    "  k:                     %.4f\n",
+    "  sensitivity_floor_mb:  %.1f\n",
+    "  min_required_cells:    %d\n",
+    "  Loci scored:            %d\n",
+    "  effective_threshold range: %d - %d"
+  ),
+  k,
+  sensitivity_floor_mb,
+  min_required_cells,
+  nrow(thresholded_df),
+  min(thresholded_df$effective_threshold, na.rm = TRUE),
+  max(thresholded_df$effective_threshold, na.rm = TRUE)
+  ))
+  
   return(thresholded_df)
 }
 
@@ -705,52 +891,50 @@ score_cnv_clusters <- function(
     clustered_events,
     cell_sizes,
     by_union,
-    boundaries_mb        = c(50, 19),
-    base_fraction        = 0.05,
-    step                 = 0.03,
-    fractions            = NULL,
+    chromosome_arms,
+    k,
     n_cells              = NULL,
-    threshold_method     = c("auto", "single", "manual"),
-    threshold_mode       = c("fractions", "number"),
-    min_cap_threshold    = 2L,
-    max_cap_threshold    = 25L,
-    max_tiers            = 2L,
-    total_chromosome_permission = 70,
-    round_fun = ceiling
+    min_required_cells    = 2L,
+    p_arm_permission     = 60,
+    q_arm_permission     = 60,  
+    whole_chr_permission = 65,  
+    sensitivity_floor_mb = 20,
+    round_fun = ceiling,
+    sample_col = "sample",
+    cell_coll = "cell_name"
 ) {
   
-  threshold_method <- match.arg(threshold_method)
-  threshold_mode <- match.arg(threshold_mode)
-  
-
   # ---- Step 1: prepare thresholds — merge only if needed ------------------
   thresholded_df <- prepare_cnv_thresholds(
-    summary_df        = summary_df,
-    clustered_events  = clustered_events,
-    by_union          = by_union,
-    cell_sizes        = cell_sizes,
-    method            = threshold_method,
-    max_tiers         = max_tiers,
-    base_fraction     = base_fraction,
-    step              = step,
-    boundaries_mb     = boundaries_mb,
-    fractions         = fractions,
-    n_cells           = n_cells,
-    mode              =  threshold_mode,
-    min_cap_threshold = min_cap_threshold,
-    max_cap_threshold = max_cap_threshold,
-    round_fun         = ceiling
+    summary_df         = summary_df,
+    clustered_events   = clustered_events,
+    by_union           = by_union,
+    cell_sizes         = cell_sizes,
+    k                  = k,
+    sensitivity_floor_mb = sensitivity_floor_mb,
+    min_required_cells = min_required_cells,
+    round_fun          = ceiling
   )
+  
+  # Add percentage of p and q for filtering based on total length
+  thresholded_df <- add_arm_percentages(
+    cnv_df          = thresholded_df,
+    chromosome_arms = chromosome_arms
+  )
+  
   
   # ---- Step 2: filter -----------------------------------------------------
   filtered_df <- filter_cnv_loci(
-    clustered_events                          = thresholded_df,
-    total_chromosome_permission = total_chromosome_permission
+    clustered_events     = thresholded_df,
+    p_arm_permission     = p_arm_permission,
+    q_arm_permission     = q_arm_permission,
+    whole_chr_permission = whole_chr_permission
   )
   
-  # ---- Step 3: classify confidence ----------------------------------------
-  # thresholded_df already has effective_threshold — pass directly
-  # No second prepare needed — filter only removes rows, columns intact
-  classify_cnv_loci(
-    df         = filtered_df)
+  scored_std <- standardise_cluster_boundaries(
+    clustered_events = filtered_df,
+    chromosome_arms  = chromosome_arms,
+    sample_col       = sample_col,
+    cell_col         = cell_col
+  )
 }
